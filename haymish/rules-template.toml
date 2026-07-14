@@ -1,0 +1,82 @@
+# Haymish rules
+# ================
+# Lives at ~/.haymish/rules.toml (run `haymish init` to install this template).
+#
+# Each [rule.<name>] declares a query, an optional classifier, and a lifecycle ladder.
+# All lifecycle stages are optional and age-gated by the PHOTO'S OWN DATE (not when
+# it was first matched), so behavior is predictable: "screenshots older than 14 days
+# get hidden," full stop.
+#
+#   file    = { album = "...", keyword = "..." }  # immediate: filed, still visible
+#   hide    = { after_days = N }                  # off the camera roll (Photos Hidden album)
+#   archive = { after_days = N }                  # original exported to [global].backup, checksum-verified
+#   delete  = { after_days = N }                  # STAGED ONLY — nothing is deleted until you run
+#                                                 # `haymish confirm-deletes` and approve the
+#                                                 # macOS system dialog. Deletion requires a
+#                                                 # verified archive copy unless you override.
+#
+# Rules run in file order. `exclude_matched_by` keeps a photo claimed by an earlier
+# rule from being re-processed by a later one.
+
+[global]
+# library = "~/Pictures/Photos Library.photoslibrary"  # default: system library
+# backup = "/Volumes/PhotoVault/haymish"            # REQUIRED before archive/delete stages run
+report_dir = "~/.haymish/reports"
+
+[global.ollama]
+host = "http://localhost:11434"
+model = "gemma3:27b"          # vision-capable; swap for a smaller model (e.g. qwen2.5vl:7b) for speed
+
+[global.claude]
+model = "claude-sonnet-5"     # used only by rules with backend = "claude"; needs ANTHROPIC_API_KEY
+
+# ---------------------------------------------------------------------------
+# 1. Ad/product screenshots — the core roll-clutter fix. Screenshots stay
+#    findable in an album for easy sharing, leave the roll after 2 weeks,
+#    and lifecycle out after 3 months.
+[rule.ad-screenshots]
+query = { screenshot = true }
+classify = { backend = "ollama", prompt = "Is this a screenshot of a product advertisement, shopping page, listing, or item for sale? Answer only yes or no.", threshold = 0.7 }
+file = { album = "Swept/Ads & Products", keyword = "swept:ad" }
+hide = { after_days = 14 }
+archive = { after_days = 60 }
+delete = { after_days = 90 }
+
+# 2. Receipts — heuristics on Apple's labels + indexed OCR text. Runs BEFORE
+#    screenshots-general so its exclude_matched_by actually has something to exclude
+#    (exclude_matched_by only sees rules that already ran this sweep, earlier in file order).
+[rule.receipts]
+query = {}
+detector = "receipts"
+file = { album = "Swept/Receipts", keyword = "swept:receipt" }
+
+# 3. Message screenshots — chat-layout heuristics on OCR text. Same ordering reason as above.
+[rule.message-screenshots]
+query = { screenshot = true }
+detector = "messages"
+file = { album = "Swept/Messages", keyword = "swept:message" }
+
+# 4. All other screenshots — filed immediately, hidden after a month.
+[rule.screenshots-general]
+query = { screenshot = true }
+exclude_matched_by = ["ad-screenshots", "receipts", "message-screenshots"]
+file = { album = "Swept/Screenshots", keyword = "swept:screenshot" }
+hide = { after_days = 30 }
+
+# 5. Selfies — filed and hidden immediately; the album keeps them reachable.
+[rule.selfies]
+query = { selfie = true }
+file = { album = "Swept/Selfies" }
+hide = { after_days = 0 }
+
+# 6. Duplicates — keeps the best copy (resolution, then aesthetic score),
+#    stages the rest. Report-reviewed before any delete, like everything else.
+[rule.dupes]
+detector = "dupes"
+file = { album = "Swept/Duplicates" }
+
+# 7. Junk candidates (blurry, failed, noisy shots) — report-only by default.
+#    Calibrate thresholds from the scan report before enabling actions.
+[rule.junk]
+detector = "junk"
+report_only = true

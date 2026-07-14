@@ -1,0 +1,32 @@
+[project]
+name = "haymish"
+version = "0.1.0"
+description = "Clean up and categorize your Apple Photos library: rule-based sweeps for screenshots, selfies, receipts, duplicates, and junk — with a safe, staged delete lifecycle."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "osxphotos>=0.76.1,<0.77",
+    "photoscript>=0.5.3",
+    "pyobjc-core>=12",
+    "pyobjc-framework-Photos>=12",
+    "pyobjc-framework-Vision>=12",
+    "pyobjc-framework-Quartz>=12",
+    "click>=8.1",
+    "rich>=13",
+    "httpx>=0.27",
+    "imagehash>=4.3",
+    "pillow>=10",
+    "rumps>=0.4",
+]
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40"]
+
+[project.scripts]
+haymish = "haymish.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["haymish"]
