@@ -24,18 +24,35 @@ from (System Settings → Privacy & Security → Full Disk Access). That's requi
 read the Photos database. Hide/delete actions additionally prompt for Photos access
 on first use, and album/keyword writes prompt for Photos automation — approve once.
 
+## Dogfood path (recommended)
+
+```sh
+uv run haymish doctor                          # fix any ✗ first (esp. Full Disk Access)
+uv run haymish review screenshots-general      # start narrow — thumbnails, then Apply
+# or: uv run haymish review                    # all actionable rules
+uv run haymish undo                            # if something looks wrong after Apply
+```
+
+`review` opens a localhost page with thumbnails. Uncheck false positives (they're
+remembered and won't resurface), then Apply. Same stage code as `sweep --apply` —
+no separate apply path that can drift.
+
+Archive/delete stages need `[global].backup` set in `~/.haymish/rules.toml` (USB
+stick path is fine). File + hide work without it.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `review [rule]` | **Preferred.** Localhost thumbnail UI; apply only what you leave checked |
 | `scan` | Read-only inventory + report: screenshots by age, selfies, receipt/message candidates, duplicates, junk-score calibration, people-tag hygiene |
-| `sweep [rule]` | Run rules from `rules.toml`. **Dry-run by default**; `--apply` to act |
+| `sweep [rule]` | Run rules from `rules.toml`. **Dry-run by default**; `--apply` to act blindly |
 | `confirm-deletes` | Review staged deletions; requires verified backup copies; macOS shows its own final confirmation dialog |
 | `undo` | Reverse the last sweep's album/keyword/hide actions |
 | `archive` | Export originals to the backup volume, checksum-verified |
-| `import <files>` | Import into Photos and immediately run rules on them |
+| `import <files>` | Import files into Photos and immediately run rules on them |
 | `schedule` | Install a launchd job for periodic sweeps |
-| `menubar` | Menu-bar app: status, Sweep Now, Confirm Deletes |
+| `menubar` | Menu-bar app: Review Now, Sweep Now, Confirm Deletes |
 | `doctor` | Permission / environment checks |
 
 ## How rules work

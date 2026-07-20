@@ -18,8 +18,8 @@ VISION_MODEL_MARKERS = ("gemma3", "qwen2.5vl", "qwen3-vl", "llava", "llama3.2-vi
 
 def _host_app_hint() -> str:
     term = os.environ.get("TERM_PROGRAM", "")
-    hints = {"Apple_Terminal": "Terminal", "iTerm.app": "iTerm", "vscode": "VS Code"}
-    return hints.get(term, "the app you run haymish from (Terminal / iTerm / Claude)")
+    hints = {"Apple_Terminal": "Terminal", "iTerm.app": "iTerm", "vscode": "Cursor / VS Code"}
+    return hints.get(term, "the app you run haymish from (Terminal / iTerm / Cursor)")
 
 
 def check_macos() -> tuple[bool, str, str]:

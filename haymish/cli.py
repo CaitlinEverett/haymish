@@ -141,6 +141,9 @@ def sweep(rule, apply_):
 
     Never performs an actual deletion, even with --apply — the delete lifecycle
     stage only stages candidates. Run `haymish confirm-deletes` to finalize.
+
+    Prefer `haymish review` for day-to-day use — it shows thumbnails and lets you
+    uncheck false positives before anything is applied.
     """
     from .catalog import Catalog
     from .library import load_photosdb
@@ -161,7 +164,58 @@ def sweep(rule, apply_):
 
     _print_sweep_report(report, apply_)
     if not apply_:
-        console.print("\n[dim]Dry run — no changes made. Re-run with --apply to act.[/dim]")
+        console.print(
+            "\n[dim]Dry run — no changes made. "
+            "Prefer [bold]haymish review[/bold] to confirm with thumbnails, "
+            "or re-run with --apply to act blindly.[/dim]"
+        )
+
+
+@main.command()
+@click.argument("rule", required=False)
+@click.option("--no-open", is_flag=True, help="Print the URL but don't auto-open the browser.")
+def review(rule, no_open):
+    """Confirm matches in a local browser, then apply only what you leave checked.
+
+    Opens a localhost page with thumbnails for every rule that would act. Uncheck
+    anything that shouldn't happen — those (photo, rule) pairs are remembered and
+    won't resurface. Apply uses the same stage code as `sweep --apply`.
+    """
+    from .catalog import Catalog
+    from .library import load_photosdb
+    from .review import run_review
+
+    config = _load_config()
+    known = {r.name for r in config.rules}
+    if rule and rule not in known:
+        console.print(f"[red]Unknown rule:[/red] {rule!r}. Known rules: {sorted(known)}")
+        sys.exit(1)
+
+    catalog = Catalog()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+
+    console.print("[dim]Matching rules and building thumbnails…[/dim]")
+
+    def on_ready(url: str) -> None:
+        console.print(f"Review queue: [bold]{url}[/bold]")
+        console.print("[dim]Uncheck false positives, then click Apply selected. Ctrl-C cancels.[/dim]")
+
+    report = run_review(
+        config,
+        catalog,
+        photosdb,
+        rule_names=[rule] if rule else None,
+        auto_open=not no_open,
+        on_ready=on_ready,
+    )
+    catalog.close()
+
+    if report is None:
+        console.print("Nothing to review — no actionable matches (or you cancelled).")
+        return
+
+    _print_sweep_report(report, apply_=True)
 
 
 @main.command("confirm-deletes")
@@ -443,7 +497,7 @@ def schedule(interval_hours, do_uninstall, show_status):
 
 @main.command()
 def menubar():
-    """Run the menu-bar app (status, Sweep Now, Confirm Deletes badge)."""
+    """Run the menu-bar app (status, Review Now, Sweep Now, Confirm Deletes badge)."""
     from .menubar import main as menubar_main
 
     menubar_main()

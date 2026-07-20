@@ -53,6 +53,21 @@ class SweepReport:
     outcomes: list[RuleOutcome]
 
 
+@dataclass
+class PreviewCandidate:
+    uuid: str
+    filename: str
+    date: str
+    classify_detail: str = ""
+
+
+@dataclass
+class RulePreview:
+    rule: Rule
+    candidates: list  # actual Photo objects -- kept around so apply_confirmed can act on them directly
+    preview_candidates: list[PreviewCandidate]
+
+
 def _classify_model(config: Config, backend: str) -> str:
     if backend == "ollama":
         return config.ollama_model
@@ -70,7 +85,10 @@ def _select_candidates(rule: Rule, photos: list, by_uuid: dict, now) -> list:
 
 
 def _apply_classify(rule: Rule, candidates: list, config: Config, catalog: Catalog,
-                     outcome: RuleOutcome) -> list:
+                     outcome: RuleOutcome, detail_out: dict[str, str] | None = None) -> list:
+    """detail_out, if given, is populated uuid -> classify detail text for kept
+    candidates -- used by preview_sweep to show "why this matched" in the review UI.
+    Not needed by run_sweep's normal apply path, so it's optional and unused there."""
     if not rule.classify:
         return candidates
     backend_name = rule.classify["backend"]
@@ -81,9 +99,10 @@ def _apply_classify(rule: Rule, candidates: list, config: Config, catalog: Catal
 
     kept = []
     for photo in candidates:
+        detail = ""
         cached = catalog.get_verdict(photo.uuid, rule.name, phash)
         if cached is not None:
-            verdict, confidence = cached
+            verdict, confidence, detail = cached
         else:
             try:
                 result = backend.classify(photo, prompt, config)
@@ -91,10 +110,13 @@ def _apply_classify(rule: Rule, candidates: list, config: Config, catalog: Catal
                 outcome.classify_errors += 1
                 continue
             verdict, confidence = result.verdict, result.confidence
+            detail = result.detail or ""
             catalog.put_verdict(photo.uuid, rule.name, backend_name, phash,
-                                 verdict, confidence, result.detail)
+                                 verdict, confidence, detail)
         if verdict and confidence >= threshold:
             kept.append(photo)
+            if detail_out is not None:
+                detail_out[photo.uuid] = detail
     return kept
 
 
@@ -247,6 +269,70 @@ def _historically_claimed_uuids(catalog: Catalog, rule_names: set[str]) -> set[s
     return {a["uuid"] for a in actions if a["rule"] in rule_names}
 
 
+def _rules_for(config: Config, rule_names: list[str] | None) -> list[Rule]:
+    rules = [r for r in config.rules if r.enabled]
+    if rule_names:
+        wanted = set(rule_names)
+        rules = [r for r in rules if r.name in wanted]
+    return rules
+
+
+def _select_and_classify(rule: Rule, photos: list, by_uuid: dict, now, config: Config,
+                          catalog: Catalog, claimed: dict[str, str], outcome: RuleOutcome,
+                          detail_out: dict[str, str] | None = None,
+                          extra_exclude: set[str] | None = None) -> list:
+    """Shared by run_sweep and preview_sweep: query -> exclude_matched_by -> classify.
+    Stops short of any lifecycle stage. extra_exclude additionally drops uuids the
+    caller already knows should never resurface (e.g. review-rejected)."""
+    candidates = _select_candidates(rule, photos, by_uuid, now)
+    if rule.exclude_matched_by:
+        excluded = set(rule.exclude_matched_by)
+        historical = _historically_claimed_uuids(catalog, excluded)
+        candidates = [p for p in candidates
+                      if claimed.get(p.uuid) not in excluded and p.uuid not in historical]
+    if extra_exclude:
+        candidates = [p for p in candidates if p.uuid not in extra_exclude]
+    candidates = _apply_classify(rule, candidates, config, catalog, outcome, detail_out=detail_out)
+    for p in candidates:
+        claimed.setdefault(p.uuid, rule.name)
+    return candidates
+
+
+def preview_sweep(config: Config, catalog: Catalog, photosdb,
+                   rule_names: list[str] | None = None) -> list[RulePreview]:
+    """The query -> exclude -> classify phase only, with per-photo detail, for the
+    `haymish review` browser UI to render before anything is actually applied.
+    Report-only rules (nothing to confirm -- they never act) and rules with no
+    lifecycle stage at all are skipped; `scan` already covers pure reporting."""
+    photos = library.all_photos(photosdb)
+    by_uuid = {p.uuid: p for p in photos}
+    now = dt.datetime.now(dt.timezone.utc)
+    claimed: dict[str, str] = {}
+
+    previews = []
+    for rule in _rules_for(config, rule_names):
+        if rule.report_only or not (rule.file or rule.hide or rule.archive or rule.delete):
+            continue
+        outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
+        rejected = catalog.rejected_uuids_for_rule(rule.name)
+        detail: dict[str, str] = {}
+        candidates = _select_and_classify(rule, photos, by_uuid, now, config, catalog, claimed,
+                                           outcome, detail_out=detail, extra_exclude=rejected)
+        if not candidates:
+            continue
+        preview_candidates = [
+            PreviewCandidate(
+                uuid=p.uuid,
+                filename=getattr(p, "original_filename", None) or p.uuid,
+                date=str(getattr(p, "date", "")),
+                classify_detail=detail.get(p.uuid, ""),
+            )
+            for p in candidates
+        ]
+        previews.append(RulePreview(rule=rule, candidates=candidates, preview_candidates=preview_candidates))
+    return previews
+
+
 def run_sweep(config: Config, catalog: Catalog, photosdb, rule_names: list[str] | None = None,
               apply: bool = False, only_uuids: set[str] | None = None) -> SweepReport:
     """only_uuids restricts candidate selection to a specific set of photos (e.g. a
@@ -261,26 +347,18 @@ def run_sweep(config: Config, catalog: Catalog, photosdb, rule_names: list[str] 
 
     run_id = catalog.start_run("sweep-apply" if apply else "sweep-dry-run")
 
-    rules = [r for r in config.rules if r.enabled]
-    if rule_names:
-        wanted = set(rule_names)
-        rules = [r for r in rules if r.name in wanted]
-
     outcomes: list[RuleOutcome] = []
-    for rule in rules:
+    for rule in _rules_for(config, rule_names):
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
 
-        candidates = _select_candidates(rule, photos, by_uuid, now)
-        if rule.exclude_matched_by:
-            excluded = set(rule.exclude_matched_by)
-            historical = _historically_claimed_uuids(catalog, excluded)
-            candidates = [p for p in candidates
-                          if claimed.get(p.uuid) not in excluded and p.uuid not in historical]
-
-        candidates = _apply_classify(rule, candidates, config, catalog, outcome)
+        # Honor review rejects here too — otherwise `sweep --apply` (and the
+        # scheduled job) would still act on photos the user unchecked in review.
+        rejected = catalog.rejected_uuids_for_rule(rule.name)
+        candidates = _select_and_classify(
+            rule, photos, by_uuid, now, config, catalog, claimed, outcome,
+            extra_exclude=rejected,
+        )
         outcome.matched = len(candidates)
-        for p in candidates:
-            claimed.setdefault(p.uuid, rule.name)
 
         if not rule.report_only and candidates:
             ages = {p.uuid: library.photo_age_days(p, now) for p in candidates}
@@ -298,3 +376,40 @@ def run_sweep(config: Config, catalog: Catalog, photosdb, rule_names: list[str] 
     })
 
     return SweepReport(run_id=run_id, apply=apply, generated=now.isoformat(), outcomes=outcomes)
+
+
+def apply_confirmed(config: Config, catalog: Catalog, previews: list[RulePreview],
+                     selections: dict[str, set[str]]) -> SweepReport:
+    """The other half of `haymish review`: given preview_sweep's candidates and which
+    uuids the user actually checked, act on exactly that subset -- via the SAME
+    per-stage functions run_sweep --apply uses, so there's no separate code path that
+    could drift from what a normal sweep would have done. Unchecked candidates are
+    recorded as rejected so they don't resurface in the next review or sweep."""
+    now = dt.datetime.now(dt.timezone.utc)
+    run_id = catalog.start_run("review-apply")
+
+    outcomes: list[RuleOutcome] = []
+    for rp in previews:
+        rule = rp.rule
+        confirmed_uuids = selections.get(rule.name, set())
+        confirmed = [p for p in rp.candidates if p.uuid in confirmed_uuids]
+        for p in rp.candidates:
+            if p.uuid not in confirmed_uuids:
+                catalog.reject_candidate(p.uuid, rule.name)
+
+        outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
+        outcome.matched = len(confirmed)
+        if confirmed:
+            ages = {p.uuid: library.photo_age_days(p, now) for p in confirmed}
+            _apply_file_stage(rule, confirmed, run_id, catalog, True, outcome)
+            _apply_hide_stage(rule, confirmed, ages, run_id, catalog, True, outcome)
+            _apply_archive_stage(rule, confirmed, ages, run_id, config, catalog, True, outcome)
+            _apply_delete_stage(rule, confirmed, ages, run_id, catalog, True, outcome)
+        outcomes.append(outcome)
+
+    catalog.finish_run(run_id, {
+        "apply": True,
+        "counts": {o.rule: o.matched for o in outcomes},
+        "staged_deletes": sum(o.staged_deletes for o in outcomes),
+    })
+    return SweepReport(run_id=run_id, apply=True, generated=now.isoformat(), outcomes=outcomes)

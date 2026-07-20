@@ -92,6 +92,12 @@ def remove_from_album(uuids: list[str], album_path: str) -> tuple[int, list[str]
     AppleScript dictionary has no native "remove from album" verb. Because of that
     rebuild cost, this calls remove_by_id ONCE with the full uuid list rather than
     chunking like add_to_album does.
+
+    Critical: remove_by_id compares against photoscript's Photo.id, which is
+    "{uuid}/L0/001" (media-item suffix), NOT the bare osxphotos UUID our ledger
+    stores. Passing bare UUIDs makes the filter a no-op — the album is rebuilt
+    with every photo still in it, and undo silently "succeeds." Normalize to
+    Photo.id before calling.
     """
     if not uuids:
         return 0, []
@@ -107,8 +113,19 @@ def remove_from_album(uuids: list[str], album_path: str) -> tuple[int, list[str]
     if album is None:
         return 0, []  # album already gone (or path no longer matches) -- nothing to undo
 
+    photo_ids: list[str] = []
+    failed: list[str] = []
+    for uuid in uuids:
+        try:
+            photo_ids.append(_retry(Photo, uuid).id)
+        except Exception:
+            failed.append(uuid)
+
+    if not photo_ids:
+        return 0, failed
+
     try:
-        _retry(album.remove_by_id, uuids)
-        return len(uuids), []
+        _retry(album.remove_by_id, photo_ids)
+        return len(photo_ids), failed
     except Exception:
         return 0, list(uuids)

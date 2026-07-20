@@ -39,12 +39,11 @@ def _dedupe_by_uuid(pairs: list[tuple[int, str]]) -> dict[str, list[int]]:
 
 
 def undo_run(catalog: Catalog, run_id: str | None = None) -> UndoReport:
-    # Default to the most recent SWEEP run specifically, not just the most recent run
-    # of any kind -- otherwise a `haymish scan` or `haymish confirm-deletes` run
-    # after a sweep would silently become the undo target, since neither logs any
-    # undoable actions, and undo would report "nothing reversible" while the sweep
-    # the user actually meant to undo goes untouched.
-    run_id = run_id or catalog.last_run_id(mode="sweep-apply")
+    # Default to the most recent apply run (sweep --apply OR review Apply) —
+    # not just any run. A scan / dry-run / confirm-deletes after an apply would
+    # otherwise become the undo target, report "nothing reversible", and leave
+    # the real mutations untouched.
+    run_id = run_id or catalog.last_undoable_run_id()
     if run_id is None:
         return UndoReport(run_id="", errors=["no runs recorded yet"])
 

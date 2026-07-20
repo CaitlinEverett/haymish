@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS actions(
 CREATE TABLE IF NOT EXISTS runs(
   run_id TEXT PRIMARY KEY, started TEXT, finished TEXT, mode TEXT, stats TEXT
 );
+CREATE TABLE IF NOT EXISTS review_rejected(
+  uuid TEXT NOT NULL, rule TEXT NOT NULL, rejected_at TEXT,
+  PRIMARY KEY(uuid, rule)
+);
 """
 
 
@@ -55,7 +59,13 @@ def prompt_hash(backend: str, model: str, prompt: str) -> str:
 class Catalog:
     def __init__(self, path=None):
         ensure_app_dirs()
-        self.db = sqlite3.connect(path or CATALOG_PATH)
+        # check_same_thread=False: `haymish review`'s local HTTP server handles its
+        # one /apply POST on a server-spawned thread, not whichever thread created
+        # this Catalog. Every other caller in this codebase is single-threaded, and
+        # review.py's server only ever has one live request touching the catalog at
+        # a time (GET / and GET /thumb/ never read it), so this is safe in practice
+        # without adding a lock.
+        self.db = sqlite3.connect(path or CATALOG_PATH, check_same_thread=False)
         self.db.executescript(SCHEMA)
 
     def close(self):
@@ -79,11 +89,17 @@ class Catalog:
 
     # -- verdict cache ------------------------------------------------------
     def get_verdict(self, uuid: str, rule: str, phash: str):
+        """Returns (verdict, confidence, detail) or None on cache miss.
+
+        Detail is the classifier's free-text rationale — review UI surfaces it as
+        "why this matched". Empty string when the backend didn't provide one.
+        """
         row = self.db.execute(
-            "SELECT verdict, confidence FROM verdicts WHERE uuid=? AND rule=? AND prompt_hash=?",
+            "SELECT verdict, confidence, detail FROM verdicts "
+            "WHERE uuid=? AND rule=? AND prompt_hash=?",
             (uuid, rule, phash),
         ).fetchone()
-        return None if row is None else (bool(row[0]), row[1])
+        return None if row is None else (bool(row[0]), row[1], row[2] or "")
 
     def put_verdict(self, uuid: str, rule: str, backend: str, phash: str,
                     verdict: bool, confidence: float, detail: str = ""):
@@ -132,6 +148,20 @@ class Catalog:
             row = self.db.execute("SELECT run_id FROM runs ORDER BY started DESC LIMIT 1").fetchone()
         return row[0] if row else None
 
+    def last_undoable_run_id(self) -> str | None:
+        """Most recent run that could have logged album/keyword/hide/stage_delete.
+
+        Both `sweep --apply` and `review` Apply write those actions; scan /
+        dry-run / confirm-deletes do not. Picking the newest of the apply modes
+        (not "any run") keeps undo from landing on a scan that has nothing to
+        reverse.
+        """
+        row = self.db.execute(
+            "SELECT run_id FROM runs WHERE mode IN ('sweep-apply', 'review-apply') "
+            "ORDER BY started DESC LIMIT 1"
+        ).fetchone()
+        return row[0] if row else None
+
     def mark_undone(self, action_id: int):
         self.db.execute("UPDATE actions SET undone=1 WHERE id=?", (action_id,))
         self.db.commit()
@@ -175,3 +205,21 @@ class Catalog:
             "SELECT uuid, rule, staged_at, run_id FROM staged_deletes ORDER BY staged_at"
         ).fetchall()
         return [{"uuid": r[0], "rule": r[1], "staged_at": r[2], "run_id": r[3]} for r in rows]
+
+    # -- review queue ---------------------------------------------------------
+    def reject_candidate(self, uuid: str, rule: str):
+        """Records an explicit 'no, not this one' from a review session so this
+        exact (photo, rule) pairing doesn't keep resurfacing in future reviews or
+        sweeps -- unlike an unmatched classify verdict, this persists even if the
+        rule's query/classify would otherwise keep matching the photo forever."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO review_rejected(uuid, rule, rejected_at) VALUES(?,?,?)",
+            (uuid, rule, _now()),
+        )
+        self.db.commit()
+
+    def rejected_uuids_for_rule(self, rule: str) -> set[str]:
+        rows = self.db.execute(
+            "SELECT uuid FROM review_rejected WHERE rule=?", (rule,)
+        ).fetchall()
+        return {r[0] for r in rows}

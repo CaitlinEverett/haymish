@@ -91,7 +91,8 @@ class HaymishMenuBarApp(rumps.App):
         self.menu = [
             self.status_item,
             None,
-            "Sweep Now",
+            "Review Now",
+            "Sweep Now (no review)",
             self.confirm_deletes_item,
             "Open Last Report",
             None,
@@ -113,7 +114,20 @@ class HaymishMenuBarApp(rumps.App):
     def _on_staged_deletes_timer(self, _timer):
         self.refresh_staged_deletes_count()
 
-    @rumps.clicked("Sweep Now")
+    @rumps.clicked("Review Now")
+    def review_now(self, _sender):
+        """Opens the thumbnail review UI in a Terminal window so you can confirm
+        before anything is applied — the safe day-to-day dogfood path."""
+        shell_cmd = escape_applescript_string(f"cd {PROJECT_DIR} && uv run haymish review")
+        script = (
+            'tell application "Terminal"\n'
+            "  activate\n"
+            f'  do script "{shell_cmd}"\n'
+            "end tell"
+        )
+        subprocess.run(["osascript", "-e", script])
+
+    @rumps.clicked("Sweep Now (no review)")
     def sweep_now(self, sender):
         if self._sweep_running:
             return
@@ -128,7 +142,8 @@ class HaymishMenuBarApp(rumps.App):
 
         try:
             proc = subprocess.run(
-                ["haymish", "sweep", "--apply"],
+                ["uv", "run", "haymish", "sweep", "--apply"],
+                cwd=PROJECT_DIR,
                 capture_output=True,
                 text=True,
                 timeout=3600,
@@ -144,13 +159,13 @@ class HaymishMenuBarApp(rumps.App):
             notify("Sweep failed", str(e))
         finally:
             self._sweep_running = False
-            sender.title = "Sweep Now"
+            sender.title = "Sweep Now (no review)"
             sender.set_callback(self.sweep_now)
             self.refresh_status()
 
     @rumps.clicked("Confirm Deletes (0)")
     def confirm_deletes(self, sender):
-        shell_cmd = escape_applescript_string(f"cd {PROJECT_DIR} && haymish confirm-deletes")
+        shell_cmd = escape_applescript_string(f"cd {PROJECT_DIR} && uv run haymish confirm-deletes")
         script = (
             'tell application "Terminal"\n'
             "  activate\n"
