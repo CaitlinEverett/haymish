@@ -3,6 +3,11 @@
 Reversible: moves assets into/out of Photos' own Hidden album. Unlike photoscript,
 PhotoKit calls are native framework calls, not AppleScript, so they aren't subject
 to the AppleScript timeout regressions -- no retry-with-backoff needed here.
+
+iCloud note: for assets that aren't downloaded locally (osxphotos ismissing=True),
+`fetchAssetsWithLocalIdentifiers` often stops returning the asset once it is hidden
+— even with includeHiddenAssets. Unhide therefore also searches the Hidden smart
+album. Prefer hiding locally-available photos when dogfooding.
 """
 from __future__ import annotations
 
@@ -43,18 +48,67 @@ def _ensure_authorized() -> None:
         )
 
 
-def _fetch_assets(uuids: list[str]):
+def _bare_uuid(local_identifier: str) -> str:
+    """PhotoKit localIdentifiers look like '{uuid}/L0/001'; haymish ledgers store the bare uuid."""
+    return local_identifier.split("/", 1)[0]
+
+
+def _fetch_options():
     import Photos
 
     opts = Photos.PHFetchOptions.alloc().init()
     opts.setIncludeHiddenAssets_(True)  # default fetch excludes already-hidden assets
-    fetch = Photos.PHAsset.fetchAssetsWithLocalIdentifiers_options_(uuids, opts)
+    return opts
 
+
+def _fetch_assets(uuids: list[str]):
+    import Photos
+
+    opts = _fetch_options()
+    # Pass both bare and suffixed forms — some PhotoKit versions are picky after hide.
+    keys: list[str] = []
+    for u in uuids:
+        keys.append(u)
+        if "/" not in u:
+            keys.append(f"{u}/L0/001")
+    fetch = Photos.PHAsset.fetchAssetsWithLocalIdentifiers_options_(keys, opts)
+
+    # Index by bare UUID — fetch accepts bare or suffixed ids, but localIdentifier()
+    # always returns the suffixed form. Without this normalization every hide/unhide
+    # looks up the caller's bare UUID, misses, and reports "not found in library"
+    # even though PhotoKit auth and the fetch both succeeded.
     by_uuid = {}
     for i in range(fetch.count()):
         asset = fetch.objectAtIndex_(i)
-        by_uuid[str(asset.localIdentifier())] = asset
+        by_uuid[_bare_uuid(str(asset.localIdentifier()))] = asset
     return by_uuid
+
+
+def _fetch_from_hidden_album(uuids: list[str]) -> dict:
+    """Fallback when localIdentifier fetch misses already-hidden iCloud assets."""
+    import Photos
+
+    wanted = set(uuids)
+    opts = _fetch_options()
+    collections = Photos.PHAssetCollection.fetchAssetCollectionsWithType_subtype_options_(
+        Photos.PHAssetCollectionTypeSmartAlbum,
+        Photos.PHAssetCollectionSubtypeSmartAlbumAllHidden,
+        None,
+    )
+    found = {}
+    if collections.count() == 0:
+        return found
+    assets = Photos.PHAsset.fetchAssetsInAssetCollection_options_(
+        collections.objectAtIndex_(0), opts
+    )
+    for i in range(assets.count()):
+        asset = assets.objectAtIndex_(i)
+        bare = _bare_uuid(str(asset.localIdentifier()))
+        if bare in wanted:
+            found[bare] = asset
+            if len(found) == len(wanted):
+                break
+    return found
 
 
 def _set_hidden_batch(assets: list, hidden: bool) -> tuple[bool, str]:
@@ -76,6 +130,12 @@ def _apply(uuids: list[str], hidden: bool) -> dict[str, str]:
 
     results: dict[str, str] = {}
     by_uuid = _fetch_assets(uuids)
+    # Unhide path: iCloud-only assets often vanish from localIdentifier fetch once
+    # hidden; the Hidden smart album is the reliable second look.
+    if not hidden:
+        missing = [u for u in uuids if u not in by_uuid]
+        if missing:
+            by_uuid.update(_fetch_from_hidden_album(missing))
 
     found_uuids = [u for u in uuids if u in by_uuid]
     for u in uuids:

@@ -180,6 +180,17 @@ def _apply_hide_stage(rule: Rule, candidates: list, ages: dict, run_id: str,
     # Filtered before the dry-run branch too, so a dry run's count matches what
     # --apply would actually do.
     due = [p for p in due if not getattr(p, "hidden", False)]
+    # iCloud-only assets (osxphotos ismissing=True) can be hidden via PhotoKit, but
+    # afterwards fetchAssetsWithLocalIdentifiers often stops returning them — even
+    # with includeHiddenAssets — so undo/unhide fails. Skip until the original is
+    # local; safer than a hide we can't reverse programmatically.
+    missing = [p for p in due if getattr(p, "ismissing", False)]
+    due = [p for p in due if not getattr(p, "ismissing", False)]
+    if missing:
+        outcome.action_errors.append(
+            f"{len(missing)} photo(s) skipped hide — originals not downloaded from iCloud "
+            f"(hide would succeed but unhide often cannot find them again)"
+        )
     if not apply:
         outcome.hidden = len(due)
         return
