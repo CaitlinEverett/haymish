@@ -89,6 +89,24 @@
   .score{position:absolute; top:8px; right:8px; z-index:2; background:var(--accent);
     color:var(--accent-tint); font-size:10.5px; border-radius:999px; padding:1px 7px;}
 
+  /* -- galleries (collapsed covers; click to expand members) -- */
+  input[type=number]{width:5.2rem; font:inherit; font-size:14px; color:var(--ink);
+    background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:.45rem .5rem;}
+  input[type=number]:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+  .field-label{align-self:center; white-space:nowrap;}
+  .gal-card{cursor:pointer;}
+  .gal-card:hover{border-color:var(--accent);}
+  .gal-card:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .gal-card[aria-expanded="true"]{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent);}
+  .gal-panel{grid-column:1/-1; background:var(--card); border:1px solid var(--accent);
+    border-radius:10px; padding:.9rem 1rem 1rem;}
+  .gal-panel-head{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+    border-bottom:1px solid var(--line); padding-bottom:.5rem;}
+  .gal-members{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:8px;
+    margin-top:.8rem;}
+  .gal-members .thumb{border:1px solid var(--line); border-radius:6px; overflow:hidden;}
+  .gal-more{margin-top:.7rem;}
+
   /* -- apply bar -- */
   .bar{position:fixed; bottom:0; left:0; right:0; background:var(--card); border-top:1px solid var(--line);
     padding:.9rem 1.5rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; z-index:5;}
@@ -193,6 +211,23 @@
     <p class="progress" id="review-progress"></p>
     <div id="review-root"></div>
     <div id="apply-outcome"></div>
+  </section>
+
+  <section class="block" id="galleries-block">
+    <div class="rule-header" style="border:none; padding:0; margin-bottom:.6rem;">
+      <div>
+        <h2>Galleries</h2>
+        <p class="sub" style="margin:0;">Trips and events found from when and where photos were taken.</p>
+      </div>
+      <form class="inline-form" id="gallery-form" style="margin-top:0; align-items:center;">
+        <label class="muted field-label" for="gallery-min">Min photos</label>
+        <input type="number" id="gallery-min" value="40" min="1" max="100000" step="1">
+        <button class="secondary" id="gallery-btn" type="submit">Find galleries</button>
+      </form>
+    </div>
+    <p class="progress" id="gallery-progress"></p>
+    <p class="sub" id="gallery-summary" hidden></p>
+    <div id="gallery-root"></div>
   </section>
 
   <section class="block">
@@ -615,6 +650,222 @@ $('build-btn').addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
   }
+});
+
+// ---- Galleries -------------------------------------------------------------
+// Photos.app can't show one cover standing in for the other 456 photos -- hiding
+// a photo hides it everywhere, albums included. So the collapsed view lives here:
+// covers only, click to expand the members inline.
+
+const GALLERY_CAP = 120;    // member thumbs rendered before "Show all"
+const GALLERY_MAX = 400;    // /api/gallery/thumbs honors 400 server-side
+
+let galleryEvents = [];              // events from the last /api/galleries run
+let galleryTotal = 0;                // total_events (may exceed events.length)
+const galleryMembers = new Map();    // event key -> photos[] (cache; re-expand is instant)
+const galleryShowAll = new Set();    // event keys rendered past the cap
+let galleryExpanded = null;          // key of the one expanded gallery, or null
+let galleryLoading = null;           // key currently fetching member thumbs
+
+function galleryCaption(ev) {
+  const n = ev.photo_count || 0;
+  const bits = [n + ' photo' + (n === 1 ? '' : 's')];
+  const d = ev.days || 0;
+  if (d) bits.push(d + ' day' + (d === 1 ? '' : 's'));
+  return bits.join(' · ');
+}
+
+function galleryWhen(ev) {
+  const a = ev.start ? String(ev.start).slice(0, 10) : '';
+  const b = ev.end ? String(ev.end).slice(0, 10) : '';
+  if (a && b && a !== b) return a + ' – ' + b;
+  return a || b || '';
+}
+
+function galleryTooltip(ev) {
+  return [ev.label, ev.place, galleryWhen(ev)].filter(Boolean).join(' · ');
+}
+
+const THUMB_FALLBACK =
+  ' onerror="this.parentNode.innerHTML=\'<div class=&quot;no-thumb&quot;>no preview</div>\'"';
+
+function galleryCardHtml(ev, idx) {
+  const open = galleryExpanded === ev.key;
+  const cover = ev.cover
+    ? '<img src="/thumb/' + encodeURIComponent(ev.cover) + '" alt="Cover photo for ' +
+      esc(ev.label) + '" loading="lazy"' + THUMB_FALLBACK + '>'
+    : noThumbTile();
+  return '<div class="card gal-card" role="button" tabindex="0" data-gal-idx="' + idx + '"' +
+    ' aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="gal-panel-' + idx + '"' +
+    ' title="' + esc(galleryTooltip(ev)) + '">' +
+    '<div class="thumb">' + cover + '</div>' +
+    '<p class="filename" title="' + esc(ev.label) + '">' + esc(ev.label) + '</p>' +
+    '<p class="detail">' + esc(galleryCaption(ev)) + '</p>' +
+    '</div>';
+}
+
+function galleryPanelHtml(ev, idx) {
+  let body;
+  if (galleryLoading === ev.key) {
+    body = '<p class="progress" id="gallery-panel-progress">loading photos…</p>';
+  } else {
+    const photos = galleryMembers.get(ev.key) || [];
+    if (!photos.length) {
+      body = '<p class="muted" style="margin-top:.8rem;">No photos to preview.</p>';
+    } else {
+      const showAll = galleryShowAll.has(ev.key);
+      const shown = showAll ? photos : photos.slice(0, GALLERY_CAP);
+      body = '<div class="gal-members">' + shown.map(p => {
+        const img = p.thumb
+          ? '<img src="/thumb/' + encodeURIComponent(p.uuid) + '" alt="' + esc(p.filename || 'photo') +
+            '" loading="lazy"' + THUMB_FALLBACK + '>'
+          : noThumbTile();
+        return '<div class="thumb" title="' + esc(p.filename || '') + '">' + img + '</div>';
+      }).join('') + '</div>';
+      const notes = [];
+      if (!showAll && photos.length > shown.length) {
+        notes.push('<button type="button" class="link-btn" data-gal-action="show-all">Show all ' +
+          photos.length + '</button>');
+      }
+      const count = ev.photo_count || 0;
+      if (count > photos.length) {
+        notes.push('<span class="muted">Previewing the first ' + photos.length + ' of ' +
+          count + ' photos.</span>');
+      }
+      if (notes.length) {
+        body += '<p class="gal-more">' + notes.join(' &nbsp; ') + '</p>';
+      }
+    }
+  }
+  return '<div class="gal-panel" id="gal-panel-' + idx + '" role="region" aria-label="' +
+    esc(ev.label) + '">' +
+    '<div class="gal-panel-head"><div>' +
+    '<h3>' + esc(ev.label) + '</h3>' +
+    '<p class="rule-meta">' + esc([ev.place, galleryWhen(ev), galleryCaption(ev)]
+      .filter(Boolean).join(' · ')) + '</p>' +
+    '</div><div class="rule-actions">' +
+    '<button type="button" class="link-btn" data-gal-action="collapse">Collapse</button>' +
+    '</div></div>' + body + '</div>';
+}
+
+function renderGalleries() {
+  const root = $('gallery-root');
+  const summary = $('gallery-summary');
+  if (!galleryEvents.length) {
+    root.innerHTML = '<p class="muted">No galleries found — try a lower minimum.</p>';
+    summary.hidden = true;
+    return;
+  }
+  summary.hidden = false;
+  summary.textContent = galleryTotal > galleryEvents.length
+    ? 'Showing ' + galleryEvents.length + ' of ' + galleryTotal + ' galleries.'
+    : galleryEvents.length + ' galler' + (galleryEvents.length === 1 ? 'y' : 'ies') + '.';
+  let html = '<div class="grid">';
+  galleryEvents.forEach((ev, i) => {
+    html += galleryCardHtml(ev, i);
+    if (galleryExpanded === ev.key) html += galleryPanelHtml(ev, i);
+  });
+  root.innerHTML = html + '</div>';
+}
+
+// Every state change re-renders the grid, which throws away the focused node --
+// put focus back on the card that was activated so keyboard users keep their place.
+function focusGallery(sel) {
+  const el = $('gallery-root').querySelector(sel);
+  if (el) el.focus();
+}
+
+async function toggleGallery(idx) {
+  const ev = galleryEvents[idx];
+  if (!ev) return;
+  if (galleryExpanded === ev.key) {           // collapse
+    galleryExpanded = null;
+    renderGalleries();
+    focusGallery('[data-gal-idx="' + idx + '"]');
+    return;
+  }
+  galleryExpanded = ev.key;                   // only one open at a time
+  galleryShowAll.delete(ev.key);
+  if (galleryMembers.has(ev.key)) {
+    renderGalleries();
+    focusGallery('[data-gal-idx="' + idx + '"]');
+    return;
+  }
+
+  galleryLoading = ev.key;
+  renderGalleries();
+  try {
+    const uuids = (ev.uuids || []).slice(0, GALLERY_MAX);
+    const result = await runJob('/api/gallery/thumbs', { uuids }, p => {
+      const el = $('gallery-panel-progress');
+      if (el) el.textContent = phaseText(p);
+    });
+    galleryMembers.set(ev.key, (result && result.photos) || []);
+  } catch (err) {
+    if (galleryExpanded === ev.key) galleryExpanded = null;
+    banner('Could not load gallery photos: ' + err.message);
+  } finally {
+    galleryLoading = null;
+    const wasFocused = !document.activeElement || document.activeElement === document.body;
+    renderGalleries();
+    if (wasFocused) focusGallery('[data-gal-idx="' + idx + '"]');
+  }
+}
+
+$('gallery-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('gallery-btn'), prog = $('gallery-progress'), minEl = $('gallery-min');
+  let minPhotos = parseInt(minEl.value, 10);
+  if (!Number.isFinite(minPhotos) || minPhotos < 1) { minPhotos = 40; minEl.value = '40'; }
+  btn.disabled = true;
+  prog.textContent = 'starting…';
+  try {
+    const result = await runJob('/api/galleries', { min_photos: minPhotos },
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    galleryEvents = (result && result.events) || [];
+    galleryTotal = (result && result.total_events) || galleryEvents.length;
+    galleryMembers.clear();
+    galleryShowAll.clear();
+    galleryExpanded = null;
+    galleryLoading = null;
+    renderGalleries();
+    $('galleries-block').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (err) {
+    prog.textContent = '';
+    banner('Finding galleries failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('gallery-root').addEventListener('click', e => {
+  const act = e.target.closest('[data-gal-action]');
+  if (act) {
+    const panel = act.closest('.gal-panel');
+    const idx = panel ? panel.id.slice('gal-panel-'.length) : '';
+    const key = galleryExpanded;
+    if (act.dataset.galAction === 'collapse') {
+      galleryExpanded = null;
+      renderGalleries();
+      focusGallery('[data-gal-idx="' + idx + '"]');
+    } else {
+      if (key) galleryShowAll.add(key);
+      renderGalleries();
+      focusGallery('#gal-panel-' + idx + ' [data-gal-action="collapse"]');
+    }
+    return;
+  }
+  const card = e.target.closest('.gal-card');
+  if (card) toggleGallery(Number(card.dataset.galIdx));
+});
+
+$('gallery-root').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  const card = e.target.closest('.gal-card');
+  if (!card) return;
+  e.preventDefault();
+  toggleGallery(Number(card.dataset.galIdx));
 });
 
 // ---- Rules -----------------------------------------------------------------
