@@ -70,6 +70,7 @@
     border-bottom:1px solid var(--line); padding-bottom:.5rem; margin-bottom:1rem;}
   h3{font-size:15px; font-weight:500; margin:0;}
   .rule-meta{font-size:12.5px; color:var(--ink-3); margin:2px 0 0;}
+  .rule-error{font-size:12.5px; color:var(--red); margin:4px 0 0;}
   .rule-actions{display:flex; gap:10px; flex-shrink:0;}
   .link-btn{background:none; border:none; color:var(--accent); font-size:12.5px; cursor:pointer;
     padding:0; text-decoration:underline;}
@@ -397,7 +398,9 @@ function renderSession(payload) {
     html += '<p class="plan-desc">' + esc(payload.plan.description) + '</p>';
   }
   const rules = payload.rules || [];
-  if (!rules.length || rules.every(r => !(r.candidates || []).length)) {
+  const hasCandidates = rules.some(r => (r.candidates || []).length);
+  const hasErrors = rules.some(r => (r.errors || []).length);
+  if (!rules.length || (!hasCandidates && !hasErrors)) {
     root.innerHTML = html + '<p class="muted">Nothing matched.</p>';
     $('apply-bar').hidden = true;
     root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -406,14 +409,21 @@ function renderSession(payload) {
 
   for (const rule of rules) {
     const cands = rule.candidates || [];
-    if (!cands.length) continue;
+    const errors = rule.errors || [];
+    // Keep a rule visible with zero candidates when it has an error to explain
+    // why (e.g. "no photos indexed yet") -- otherwise this silently reads as
+    // "nothing to do" when the truth is "couldn't check".
+    if (!cands.length && !errors.length) continue;
+    const errorHtml = errors.map(e => '<p class="rule-error">' + esc(e) + '</p>').join('');
     html += '<section class="rule-section" data-rule="' + esc(rule.name) + '">' +
       '<div class="rule-header"><div>' +
       '<h3>' + esc(rule.name) + '</h3>' +
       '<p class="rule-meta">' + cands.length + ' matched · ' + esc(rule.action) + '</p>' +
+      errorHtml +
       '</div><div class="rule-actions">' +
+      (cands.length ? (
       '<button type="button" class="link-btn" data-action="select-all">select all</button>' +
-      '<button type="button" class="link-btn" data-action="select-none">select none</button>' +
+      '<button type="button" class="link-btn" data-action="select-none">select none</button>') : '') +
       '</div></div><div class="grid">';
     for (const c of cands) {
       const thumb = c.thumb

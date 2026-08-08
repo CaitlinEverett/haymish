@@ -94,12 +94,16 @@ def _render_page(previews: list[RulePreview]) -> str:
               {detail_html}
             </label>""")
 
+        error_html = "".join(
+            f'<p class="rule-error">{htmllib.escape(e)}</p>' for e in rp.errors
+        )
         sections.append(f"""
         <section class="rule-section" data-rule="{htmllib.escape(rp.rule.name)}">
           <div class="rule-header">
             <div>
               <h2>{htmllib.escape(rp.rule.name)}</h2>
               <p class="rule-meta">{len(rp.preview_candidates)} matched · {htmllib.escape(_rule_label(rp.rule))}</p>
+              {error_html}
             </div>
             <div class="rule-actions">
               <button type="button" class="link-btn" data-action="select-all">select all</button>
@@ -130,6 +134,8 @@ def _render_page(previews: list[RulePreview]) -> str:
     border-bottom:1px solid var(--line); padding-bottom:.5rem; margin-bottom:1rem;}}
   h2{{font-size:16px; font-weight:500; margin:0; text-transform:none;}}
   .rule-meta{{font-size:12.5px; color:var(--ink-3); margin:2px 0 0;}}
+  .rule-error{{font-size:12.5px; color:#b0492e; margin:4px 0 0;}}
+  @media (prefers-color-scheme: dark){{ .rule-error{{color:#e08468;}} }}
   .rule-actions{{display:flex; gap:10px;}}
   .link-btn{{background:none; border:none; color:var(--accent); font-size:12.5px; cursor:pointer;
     padding:0; text-decoration:underline;}}
@@ -265,9 +271,13 @@ def run_review(config: Config, catalog: Catalog, photosdb, rule_names: list[str]
     """Blocks until the user applies (or Ctrl-C cancels, applying nothing).
     on_ready(url), if given, is called once the server is listening -- lets the
     caller print/open the URL without this function needing to know how.
-    rules_override reviews ephemeral rules (from `ask`/`find`) instead of rules.toml."""
+    rules_override reviews ephemeral rules (from `ask`/`find`) instead of rules.toml.
+    A rule with zero candidates but an error (e.g. semantic rule, no AI index built
+    yet) still opens the browser so the reason is visible, rather than silently
+    reporting "nothing matched" for what was actually "couldn't check"."""
     previews = [rp for rp in preview_sweep(config, catalog, photosdb, rule_names,
-                                            rules_override=rules_override) if rp.candidates]
+                                            rules_override=rules_override)
+                if rp.candidates or rp.errors]
     if not previews:
         return None
 

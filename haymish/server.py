@@ -134,6 +134,7 @@ def _session_payload(session_id: str, session: dict) -> dict:
             {
                 "name": rp.rule.name,
                 "action": _rule_action_label(rp.rule),
+                "errors": rp.errors,
                 "candidates": [
                     {"uuid": pc.uuid, "filename": pc.filename, "date": pc.date,
                      "detail": pc.classify_detail,
@@ -152,10 +153,13 @@ def _build_previews_session(state: ServeState, job: Job, rules_override=None,
     catalog = Catalog()
     try:
         job.progress = {"phase": "matching"}
+        # Keep rules with zero candidates when they have an error to explain why
+        # (e.g. semantic rule with no AI index built yet) -- dropping them here
+        # would silently turn "couldn't check" back into "nothing to do".
         previews = [rp for rp in preview_sweep(state.config, catalog, photosdb,
                                                 rule_names=rule_names,
                                                 rules_override=rules_override)
-                    if rp.candidates]
+                    if rp.candidates or rp.errors]
         total = sum(len(rp.candidates) for rp in previews)
         done = 0
         for rp in previews:

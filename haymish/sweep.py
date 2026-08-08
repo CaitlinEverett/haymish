@@ -66,6 +66,7 @@ class RulePreview:
     rule: Rule
     candidates: list  # actual Photo objects -- kept around so apply_confirmed can act on them directly
     preview_candidates: list[PreviewCandidate]
+    errors: list[str] = field(default_factory=list)  # e.g. "no photos indexed yet — run haymish index"
 
 
 def _classify_model(config: Config, backend: str) -> str:
@@ -385,8 +386,18 @@ def preview_sweep(config: Config, catalog: Catalog, photosdb,
         detail: dict[str, str] = {}
         candidates = _select_and_classify(rule, photos, by_uuid, now, config, catalog, claimed,
                                            outcome, detail_out=detail, extra_exclude=rejected)
-        if not candidates:
+        # Even with zero candidates, keep this rule if there's an error to explain
+        # why -- silently vanishing a rule from the review queue when e.g. the AI
+        # index isn't built yet or Ollama is unreachable reads as "nothing to do"
+        # when the truth is "couldn't check." Both classify_errors (individual
+        # skipped photos) and action_errors (rule-level failures like "no index")
+        # matter here; classify_errors alone don't get a message, so surface a
+        # generic one if that's the only signal.
+        if not candidates and not outcome.action_errors and not outcome.classify_errors:
             continue
+        errors = list(outcome.action_errors)
+        if outcome.classify_errors and not errors:
+            errors.append(f"{outcome.classify_errors} photo(s) couldn't be checked (see logs)")
         preview_candidates = [
             PreviewCandidate(
                 uuid=p.uuid,
@@ -396,7 +407,8 @@ def preview_sweep(config: Config, catalog: Catalog, photosdb,
             )
             for p in candidates
         ]
-        previews.append(RulePreview(rule=rule, candidates=candidates, preview_candidates=preview_candidates))
+        previews.append(RulePreview(rule=rule, candidates=candidates,
+                                     preview_candidates=preview_candidates, errors=errors))
     return previews
 
 
