@@ -238,7 +238,9 @@ def index(no_captions, limit):
     catalog = Catalog()
     with console.status("Loading Photos library (this can take a minute on large libraries)…"):
         photosdb = load_photosdb(config.library)
-        photos = [p for p in all_photos(photosdb) if not getattr(p, "ismovie", False)]
+        # Videos included: they're captioned/embedded from their poster frame,
+        # so find/ask/semantic rules work on them too.
+        photos = all_photos(photosdb)
 
     from rich.progress import Progress
 

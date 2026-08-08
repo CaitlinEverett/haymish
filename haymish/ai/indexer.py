@@ -43,12 +43,10 @@ class IndexStats:
 
 
 def _caption_source(photo) -> str | None:
-    """Smallest local image we can feed the vision model: Photos' own preview
-    derivative first, full original as fallback."""
-    derivatives = getattr(photo, "path_derivatives", None) or []
-    if derivatives:
-        return derivatives[0]
-    return getattr(photo, "path", None)
+    """Smallest local image we can feed the vision model — for videos, the
+    poster-frame derivative (captioning one representative frame is what makes
+    `find`/`ask` work on videos at all)."""
+    return library.image_source(photo)
 
 
 def build_document(photo, caption: str | None) -> str:

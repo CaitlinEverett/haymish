@@ -42,8 +42,11 @@ def ensure_thumbnail(photo) -> Path | None:
 
     from PIL import Image
 
-    derivatives = getattr(photo, "path_derivatives", None) or []
-    source = derivatives[0] if derivatives else getattr(photo, "path", None)
+    from . import library
+
+    # image_source picks an image derivative — for videos that's the poster
+    # frame, so video candidates get a real thumbnail instead of a placeholder.
+    source = library.image_source(photo)
     if not source:
         return None
 

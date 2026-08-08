@@ -52,6 +52,27 @@ def labels(photo) -> list[str]:
     return [l.lower() for l in (getattr(photo, "labels_normalized", None) or [])]
 
 
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".gif", ".webp"}
+
+
+def image_source(photo) -> str | None:
+    """Best local IMAGE representing this asset, or None.
+
+    For photos: smallest derivative first (faster to caption/thumbnail), original
+    as fallback. For videos: the poster-frame image derivative Photos generates —
+    never the video file itself, which vision models and PIL can't open. This is
+    what makes captioning, classify, and review thumbnails work uniformly for
+    both photos and videos.
+    """
+    derivatives = getattr(photo, "path_derivatives", None) or []
+    for d in derivatives:
+        if Path(d).suffix.lower() in _IMAGE_SUFFIXES:
+            return d
+    if getattr(photo, "ismovie", False):
+        return None  # a video's original is not an image; no poster frame -> no image
+    return getattr(photo, "path", None)
+
+
 def detected_text(photo) -> str:
     """Photos' own indexed OCR text (free — no Vision pass needed).
 
@@ -81,6 +102,11 @@ def score(photo, field: str) -> float | None:
 def matches_query(photo, query: dict, now: dt.datetime | None = None) -> bool:
     """Apply a rule's query table to one photo."""
     if query.get("screenshot") is not None and bool(getattr(photo, "screenshot", False)) != query["screenshot"]:
+        return False
+    if query.get("movie") is not None and bool(getattr(photo, "ismovie", False)) != query["movie"]:
+        return False
+    if query.get("screen_recording") is not None and \
+            bool(getattr(photo, "screen_recording", False)) != query["screen_recording"]:
         return False
     if query.get("selfie") is not None and is_selfie(photo) != query["selfie"]:
         return False

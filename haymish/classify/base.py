@@ -53,17 +53,20 @@ def get_backend(name: str):
 
 
 def require_local_path(photo) -> str:
-    """Shared helper: every image-based backend needs the original on disk.
+    """Shared helper: every vision backend needs a local IMAGE on disk.
 
-    osxphotos' `photo.path` is None when the original lives only in iCloud
-    (Optimize Mac Storage). Rather than each backend silently returning a
-    false "no", this raises so the caller can distinguish "classified as no"
-    from "couldn't even look at it".
+    Delegates to library.image_source, which prefers the smallest derivative and
+    — for videos — returns the poster-frame image Photos generates rather than
+    the video file (which vision models can't ingest). Raises rather than
+    silently returning a false "no", so callers can distinguish "classified as
+    no" from "couldn't even look at it"; the sweep engine counts these as
+    classify_errors and skips the photo for that rule.
     """
-    path = getattr(photo, "path", None)
+    from .. import library
+
+    path = library.image_source(photo)
     if not path:
-        raise ClassifyError(
-            f"{getattr(photo, 'uuid', '?')}: original not downloaded locally "
-            f"(iCloud storage-optimized) — run with a local copy or export first"
-        )
+        kind = "video has no poster-frame derivative" if getattr(photo, "ismovie", False) \
+            else "original not downloaded locally (iCloud storage-optimized)"
+        raise ClassifyError(f"{getattr(photo, 'uuid', '?')}: no local image to classify — {kind}")
     return path

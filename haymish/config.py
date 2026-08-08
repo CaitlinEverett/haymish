@@ -57,7 +57,7 @@ class Config:
 
 
 VALID_QUERY_KEYS = {
-    "screenshot", "selfie", "favorite", "hidden",
+    "screenshot", "selfie", "favorite", "hidden", "movie", "screen_recording",
     "min_age_days", "max_age_days", "albums", "exclude_albums", "keywords",
 }
 VALID_RULE_KEYS = {

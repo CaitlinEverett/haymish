@@ -89,6 +89,14 @@ file = { album = "Swept/Duplicates" }
 detector = "junk"
 report_only = true
 
+# 8. Screen recordings — filed and off the roll after 2 weeks. Videos work in
+#    rules via `movie` / `screen_recording` query flags; the AI index covers
+#    them too (captioned from their poster frame).
+[rule.screen-recordings]
+query = { screen_recording = true }
+file = { album = "Swept/Screen Recordings" }
+hide = { after_days = 14 }
+
 # ---------------------------------------------------------------------------
 # Semantic rules: match by CONTENT using the AI index (`haymish index` first).
 # `semantic.query` is a plain-language description; min_score tunes strictness.

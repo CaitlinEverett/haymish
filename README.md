@@ -71,6 +71,11 @@ file = { album = "Recipes" }
 what's requested; archive and delete stay in `rules.toml` plus the staged
 `confirm-deletes` flow.
 
+**Videos are covered too.** Rules can target them with `movie = true` or
+`screen_recording = true` query flags; the index captions each video's poster
+frame, so `find` and `ask` see them; every action (file, hide, archive, delete)
+works on videos the same as photos.
+
 ## Commands
 
 | Command | What it does |

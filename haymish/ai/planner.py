@@ -24,7 +24,8 @@ from . import ollama_client
 from .ollama_client import AIError
 
 _ALLOWED_PLAN_KEYS = {"name", "description", "query", "semantic", "classify", "file", "hide"}
-_ALLOWED_QUERY_KEYS = {"screenshot", "selfie", "favorite", "min_age_days", "max_age_days"}
+_ALLOWED_QUERY_KEYS = {"screenshot", "selfie", "favorite", "movie", "screen_recording",
+                        "min_age_days", "max_age_days"}
 
 SYSTEM_PROMPT = """You translate a user's photo-cleanup request into a JSON plan for the Haymish photo tool. Output ONLY a JSON object, no other text.
 
@@ -36,6 +37,8 @@ Schema (include only the fields the request needs):
     "screenshot": true|false,    // photo is a screenshot
     "selfie": true|false,        // front-camera photo
     "favorite": true|false,
+    "movie": true|false,         // asset is a video
+    "screen_recording": true|false,  // video is a screen recording
     "min_age_days": int,         // only photos at least this old
     "max_age_days": int          // only photos at most this old
   },
@@ -67,6 +70,9 @@ Request: "hide all my selfies older than a week"
 
 Request: "tag photos of my dog"
 {"name":"dog-photos","description":"Tag photos of a dog with the keyword 'dog'.","semantic":{"query":"photo of a pet dog","min_score":0.4},"classify":{"prompt":"Is there a dog in this photo? Answer only yes or no.","threshold":0.7},"file":{"keyword":"dog"}}
+
+Request: "get old screen recordings off my roll"
+{"name":"old-screen-recordings","description":"File screen recordings older than 2 weeks and hide them from the camera roll.","query":{"screen_recording":true,"min_age_days":14},"file":{"album":"Swept/Screen Recordings"},"hide":{"after_days":0}}
 """
 
 
