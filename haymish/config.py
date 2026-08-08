@@ -57,8 +57,21 @@ class Config:
 
 
 VALID_QUERY_KEYS = {
+    # kind
     "screenshot", "selfie", "favorite", "hidden", "movie", "screen_recording",
-    "min_age_days", "max_age_days", "albums", "exclude_albums", "keywords",
+    "raw", "burst", "live_photo",
+    # time — relative (drifts each run) and absolute (a fixed shoot or trip)
+    "min_age_days", "max_age_days", "after", "before",
+    # organization
+    "albums", "exclude_albums", "keywords",
+    # place
+    "place", "near", "has_location",
+    # people
+    "persons", "has_faces",
+    # quality, for culling
+    "min_score", "max_failure", "min_rating",
+    # capture
+    "camera", "lens",
 }
 VALID_RULE_KEYS = {
     "query", "detector", "semantic", "classify", "file", "hide", "archive", "delete",
@@ -78,6 +91,58 @@ def _stage(raw: dict | None, rule: str, stage: str) -> StageConfig | None:
     return StageConfig(after_days=int(raw["after_days"]))
 
 
+def _validate_query_shapes(name: str, query: dict) -> None:
+    """Catch malformed query values at load time.
+
+    These filters are cheap to evaluate but easy to get subtly wrong, and a bad
+    value fails silently at match time (matching nothing, which reads as "no
+    photos qualify" rather than "your rule is broken"). Better to refuse the
+    config with a message naming the fix.
+    """
+    import datetime as dt
+
+    if "near" in query:
+        near = query["near"]
+        if not isinstance(near, dict) or "lat" not in near or "lon" not in near:
+            raise ConfigError(
+                f"[rule.{name}].query.near needs lat and lon, e.g. "
+                f'near = {{ lat = 41.88, lon = -87.63, km = 25 }}'
+            )
+        try:
+            lat, lon = float(near["lat"]), float(near["lon"])
+        except (TypeError, ValueError):
+            raise ConfigError(f"[rule.{name}].query.near lat/lon must be numbers") from None
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            raise ConfigError(
+                f"[rule.{name}].query.near has out-of-range coordinates "
+                f"(lat {lat}, lon {lon}) — lat is -90..90, lon is -180..180"
+            )
+
+    for key in ("after", "before"):
+        if key in query:
+            value = query[key]
+            if isinstance(value, (dt.date, dt.datetime)):
+                continue
+            try:
+                dt.datetime.fromisoformat(str(value))
+            except ValueError:
+                raise ConfigError(
+                    f"[rule.{name}].query.{key} must be a date like {key} = 2026-03-01 "
+                    f"(unquoted TOML date) or an ISO string — got {value!r}"
+                ) from None
+
+    for key in ("min_score", "max_failure"):
+        if key in query and not 0 <= float(query[key]) <= 1:
+            raise ConfigError(f"[rule.{name}].query.{key} must be between 0 and 1")
+
+    if "min_rating" in query and not 0 <= int(query["min_rating"]) <= 5:
+        raise ConfigError(f"[rule.{name}].query.min_rating must be 0-5")
+
+    for key in ("persons", "albums", "exclude_albums", "keywords"):
+        if key in query and not isinstance(query[key], list):
+            raise ConfigError(f"[rule.{name}].query.{key} must be a list, e.g. {key} = [\"Alice\"]")
+
+
 def _parse_rule(name: str, raw: dict) -> Rule:
     unknown = {k for k in raw if k not in VALID_RULE_KEYS}
     if unknown:
@@ -86,6 +151,7 @@ def _parse_rule(name: str, raw: dict) -> Rule:
     bad = {k for k in query if k not in VALID_QUERY_KEYS}
     if bad:
         raise ConfigError(f"[rule.{name}].query has unknown keys: {sorted(bad)} (valid: {sorted(VALID_QUERY_KEYS)})")
+    _validate_query_shapes(name, query)
     detector = raw.get("detector")
     if detector is not None and detector not in KNOWN_DETECTORS:
         raise ConfigError(f"[rule.{name}].detector {detector!r} unknown (valid: {sorted(KNOWN_DETECTORS)})")

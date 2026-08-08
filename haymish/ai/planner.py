@@ -25,7 +25,12 @@ from .ollama_client import AIError
 
 _ALLOWED_PLAN_KEYS = {"name", "description", "query", "semantic", "classify", "file", "hide"}
 _ALLOWED_QUERY_KEYS = {"screenshot", "selfie", "favorite", "movie", "screen_recording",
-                        "min_age_days", "max_age_days"}
+                        "raw", "burst", "live_photo",
+                        "min_age_days", "max_age_days", "after", "before",
+                        "place", "near", "has_location",
+                        "persons", "has_faces",
+                        "min_score", "max_failure", "min_rating",
+                        "camera", "lens"}
 
 SYSTEM_PROMPT = """You translate a user's photo-cleanup request into a JSON plan for the Haymish photo tool. Output ONLY a JSON object, no other text.
 
@@ -39,8 +44,23 @@ Schema (include only the fields the request needs):
     "favorite": true|false,
     "movie": true|false,         // asset is a video
     "screen_recording": true|false,  // video is a screen recording
-    "min_age_days": int,         // only photos at least this old
-    "max_age_days": int          // only photos at most this old
+    "raw": true|false,           // RAW file
+    "burst": true|false,
+    "live_photo": true|false,
+    "min_age_days": int,         // only photos at least this old (relative)
+    "max_age_days": int,         // only photos at most this old (relative)
+    "after": "YYYY-MM-DD",       // fixed window — use for a named trip or shoot
+    "before": "YYYY-MM-DD",      // EXCLUSIVE: to include June 15, write before "2026-06-16"
+    "place": "Chicago",          // substring of the photo's place name
+    "near": {"lat": 41.88, "lon": -87.63, "km": 25},
+    "has_location": true|false,
+    "persons": ["Alice"],        // named people in the photo (any of)
+    "has_faces": true|false,
+    "min_score": 0.0-1.0,        // Apple's overall quality score — culling
+    "max_failure": 0.0-1.0,      // Apple's "failed shot" score; low = good
+    "min_rating": 0-5,
+    "camera": "iPhone 15 Pro",   // substring of camera make/model
+    "lens": "35mm"               // substring of lens model
   },
   "semantic": {                  // content match against the photo index (use for "photos of X")
     "query": "what to look for, as a retrieval phrase",
@@ -73,6 +93,13 @@ Request: "tag photos of my dog"
 
 Request: "get old screen recordings off my roll"
 {"name":"old-screen-recordings","description":"File screen recordings older than 2 weeks and hide them from the camera roll.","query":{"screen_recording":true,"min_age_days":14},"file":{"album":"Swept/Screen Recordings"},"hide":{"after_days":0}}
+
+Request: "put every photo from my Chicago trip in March into a trip album"
+{"name":"chicago-march","description":"File photos taken near Chicago between March 1 and 8 into a trip album.","query":{"after":"2026-03-01","before":"2026-03-08","near":{"lat":41.88,"lon":-87.63,"km":40}},"file":{"album":"Trips/Chicago March"}}
+
+Request: "tag the good shots from the wedding shoot on June 14 and 15"
+{"name":"wedding-picks","description":"Tag well-scored photos from June 14-15 with 'pick'.","query":{"after":"2026-06-14","before":"2026-06-16","min_score":0.7},"file":{"keyword":"pick"}}
+(note how `before` is the 16th, not the 15th, so the 15th is included)
 """
 
 

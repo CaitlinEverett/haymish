@@ -98,6 +98,36 @@ file = { album = "Swept/Screen Recordings" }
 hide = { after_days = 14 }
 
 # ---------------------------------------------------------------------------
+# QUERY REFERENCE — every filter below reads metadata Photos already has, so
+# it's free compared to semantic/classify. Narrow with query first, then let the
+# expensive stages work on what's left.
+#
+#   kind      screenshot, selfie, favorite, hidden, movie, screen_recording,
+#             raw, burst, live_photo                       (all true/false)
+#   time      min_age_days / max_age_days   (relative — drifts each run)
+#             after / before                (fixed dates; `before` is EXCLUSIVE,
+#                                            so before = 2026-06-16 includes the 15th)
+#   place     place = "Chicago"             (substring of the place name)
+#             near = { lat = 41.88, lon = -87.63, km = 25 }
+#             has_location = true
+#   people    persons = ["Alice"]           (any of), has_faces = true
+#   quality   min_score = 0.7               (Apple's overall curation score)
+#             max_failure = 0.2             (Apple's failed-shot score; low is good)
+#             min_rating = 3                (0-5 stars)
+#   capture   camera = "iPhone 15 Pro", lens = "35mm"   (substrings)
+#   organize  albums, exclude_albums, keywords           (lists)
+#
+# Example — a trip gallery, no AI needed:
+# [rule.chicago-march]
+# query = { after = 2026-03-01, before = 2026-03-08, near = { lat = 41.88, lon = -87.63, km = 40 } }
+# file = { album = "Trips/Chicago March" }
+#
+# Example — cull a shoot by Apple's own quality scores:
+# [rule.wedding-picks]
+# query = { after = 2026-06-14, before = 2026-06-16, min_score = 0.7, max_failure = 0.2 }
+# file = { keyword = "pick" }
+
+# ---------------------------------------------------------------------------
 # Semantic rules: match by CONTENT using the AI index (`haymish index` first).
 # `semantic.query` is a plain-language description; min_score tunes strictness.
 # Tip: prototype these conversationally — `haymish ask "file my recipe
