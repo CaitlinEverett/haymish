@@ -325,8 +325,12 @@ def packs_show(name):
 @click.option("--create", "album_prefix", default=None, metavar="PREFIX",
               help='File each event into an album under PREFIX (e.g. "Trips") — '
                    "opens the review UI so you confirm before anything is created.")
+@click.option("--tag-covers", "cover_keyword", default=None, metavar="KEYWORD",
+              help='Also tag each event\'s best photo with KEYWORD (e.g. "cover"), '
+                   "picked from Apple's own quality scores. Photos has no API for "
+                   "setting an album's key photo, so a keyword is how a cover is marked.")
 @click.option("--no-open", is_flag=True, help="With --create: print the URL but don't open a browser.")
-def galleries(gap_hours, max_km, min_photos, limit, album_prefix, no_open):
+def galleries(gap_hours, max_km, min_photos, limit, sort_by, album_prefix, cover_keyword, no_open):
     """Find trips and events by when and where photos were taken.
 
     Pure metadata — no AI, no index needed. Clusters on time gaps and distance,
@@ -376,13 +380,22 @@ def galleries(gap_hours, max_km, min_photos, limit, album_prefix, no_open):
     # One ephemeral rule per event, matched by explicit uuid set, so this goes
     # through the same preview -> review -> apply path as everything else.
     from .config import Rule
+    from .events import pick_representative
     from .review import run_review
 
-    rules = [
-        Rule(name=e.key, query={"uuids": e.uuids},
-             file={"album": f"{album_prefix.rstrip('/')}/{e.label}"})
-        for e in events[:limit]
-    ]
+    rules = []
+    by_uuid = {p.uuid: p for p in photos}
+    for e in events[:limit]:
+        rules.append(Rule(name=e.key, query={"uuids": e.uuids},
+                           file={"album": f"{album_prefix.rstrip('/')}/{e.label}"}))
+        if cover_keyword:
+            # A separate one-photo rule so the cover shows up in review as its
+            # own line — you can see which frame was chosen and uncheck it if
+            # you disagree, rather than having it silently tagged.
+            cover = pick_representative([by_uuid[u] for u in e.uuids if u in by_uuid])
+            if cover is not None:
+                rules.append(Rule(name=f"{e.key}-cover", query={"uuids": [cover.uuid]},
+                                   file={"keyword": cover_keyword}))
     catalog = Catalog()
 
     def on_ready(url: str) -> None:

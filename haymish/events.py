@@ -92,6 +92,35 @@ class Event:
         return volume * duration * located
 
 
+def pick_representative(photos: list):
+    """The one photo that should stand for a group.
+
+    Ranks on signals Apple already computed for every photo, so this costs
+    nothing and needs no AI: favorites first (an explicit human judgment beats
+    any score), then overall curation score, then a penalty for shots Apple
+    flags as failed, with resolution as a tiebreak. Returns None for an empty
+    list.
+
+    Deliberately not using the AI index: a cover photo is a matter of quality,
+    not subject matter, and this needs to work before anything is indexed.
+    """
+    if not photos:
+        return None
+
+    def rank(photo):
+        from . import library
+
+        favorite = 1 if getattr(photo, "favorite", False) else 0
+        overall = library.score(photo, "overall")
+        failure = library.score(photo, "failure")
+        pixels = (getattr(photo, "width", 0) or 0) * (getattr(photo, "height", 0) or 0)
+        # Missing scores sort below scored photos rather than winning by accident.
+        quality = (overall if overall is not None else -1.0) - (failure or 0.0)
+        return (favorite, quality, pixels)
+
+    return max(photos, key=rank)
+
+
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in kilometres. Pure stdlib math."""
     p1, p2 = math.radians(lat1), math.radians(lat2)
