@@ -276,8 +276,12 @@ def index(no_captions, limit, concurrency, reindex_captions):
 
         def on_progress(done, total, phase):
             if phase not in tasks:
-                label = "Captioning" if phase == "caption" else "Embedding"
-                tasks[phase] = prog.add_task(label, total=total)
+                # Captions and embeddings are interleaved now, so one bar covers
+                # both; the label must say which work is actually happening or it
+                # reads as "captioning stalled" during a --no-captions run.
+                labels = {"caption": "Captioning", "embed": "Embedding",
+                          "index": "Embedding" if no_captions else "Captioning + embedding"}
+                tasks[phase] = prog.add_task(labels.get(phase, "Indexing"), total=total)
             prog.update(tasks[phase], completed=done)
 
         try:
