@@ -258,7 +258,7 @@ class _Cluster:
 
 
 def cluster_events(photos, *, max_gap_hours: float = 14.0, max_km: float = 60.0,
-                   min_photos: int = 5) -> list[Event]:
+                   min_photos: int = 5, borrow_km: float = 15.0) -> list[Event]:
     """Group photos into events by time proximity and, where known, location.
 
     Args:
@@ -309,32 +309,39 @@ def cluster_events(photos, *, max_gap_hours: float = 14.0, max_km: float = 60.0,
         clusters.append(current)
 
     events = _build_events(clusters, min_photos)
-    _borrow_nearby_place_names(events, max_km=max_km)
+    _borrow_nearby_place_names(events, borrow_km=borrow_km)
     return events
 
 
-def _borrow_nearby_place_names(events: list[Event], max_km: float) -> None:
+def _borrow_nearby_place_names(events: list[Event], borrow_km: float) -> None:
     """Name located-but-unnamed events after nearby named ones.
 
     Photos only reverse-geocodes some photos — location services off, a camera
     with no GPS, or a cluster that's mostly screenshots all produce an event
     with coordinates but no place name. On a real library that left obvious
     trips labelled "Apr 3–8, 2025" while the same city showed up named
-    elsewhere. If an unnamed event's centroid sits within max_km of an event we
+    elsewhere. If an unnamed event's centroid sits very close to an event we
     could name, that name almost certainly applies here too.
+
+    The radius is deliberately much tighter than the clustering radius. Those
+    answer different questions: 60 km is "still the same trip", but it's two
+    different cities — Naperville is 45 km from Chicago, so borrowing at the
+    clustering radius had them adopting each other's names. Naming is a
+    city-scale judgment, so the default here is 15 km.
 
     Uses only the user's own library as the gazetteer: no network, no geocoding
     service, nothing leaves the machine. Borrowed names are marked approximate
     (a leading "~") so a guess never reads as ground truth.
     """
     known = [(e.lat, e.lon, e.place) for e in events
-             if e.place and e.lat is not None and e.lon is not None]
+             if e.place and not e.place.startswith("~")
+             and e.lat is not None and e.lon is not None]
     if not known:
         return
     for event in events:
         if event.place or event.lat is None or event.lon is None:
             continue
-        nearest, best = None, max_km
+        nearest, best = None, borrow_km
         for lat, lon, place in known:
             distance = haversine_km(event.lat, event.lon, lat, lon)
             if distance <= best:
