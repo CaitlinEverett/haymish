@@ -1,0 +1,51 @@
+# Haymish rule pack: expenses
+#
+# For anyone who travels for work and has to turn a camera roll into an expense
+# report. Receipts get found and filed as you go, so reimbursement isn't an
+# archaeology project at the end of the month.
+#
+# Install:  haymish packs install expenses
+# Remove:   haymish packs remove expenses
+# Rules from a pack are named `expenses:<rule>` so they never collide with your
+# own. Edit this file freely once installed — it's yours.
+#
+# Pairs well with:  haymish galleries --create "Trips"
+# which groups the same photos by trip, so a receipt can live in both the
+# Receipts album and its trip album (Photos albums aren't exclusive).
+
+[pack]
+name = "expenses"
+description = "Find and file receipts for expense reporting"
+audience = "business travel, freelancers, anyone who expenses"
+# Nothing here deletes: a receipt you can't produce is a receipt you can't claim.
+# Set posture = "archival" in your rules.toml if you want that enforced globally.
+
+# ---------------------------------------------------------------------------
+# Receipts, found two ways. The detector uses Apple's own OCR text and ML labels
+# (free, instant, no index needed); the semantic rule below catches the ones it
+# misses but needs `haymish index` first.
+[rule.receipts]
+detector = "receipts"
+file = { album = "Expenses/Receipts", keyword = "expense:receipt" }
+
+# Broader net, content-based. Requires the AI index. Slightly lower precision
+# than the detector, so it files into its own album for review rather than
+# mixing straight into the main Receipts pile.
+[rule.receipts-semantic]
+semantic = { query = "photo or screenshot of a receipt, invoice, or bill showing line items and a total amount", min_score = 0.42 }
+exclude_matched_by = ["receipts"]
+file = { album = "Expenses/Receipts (found by content)", keyword = "expense:receipt" }
+
+# Confirmation emails, booking screenshots, boarding passes — the paperwork that
+# isn't a receipt but still ends up attached to an expense report.
+[rule.travel-documents]
+query = { screenshot = true }
+semantic = { query = "screenshot of a flight booking, hotel confirmation, boarding pass, or travel itinerary", min_score = 0.40 }
+file = { album = "Expenses/Travel Documents", keyword = "expense:travel" }
+
+# Whiteboards and slides from client meetings: worth keeping, shouldn't clutter
+# the roll. Filed and hidden, never deleted.
+[rule.meeting-captures]
+semantic = { query = "photo of a whiteboard, flip chart, conference slide, or presentation screen with writing or diagrams", min_score = 0.40 }
+file = { album = "Work/Meeting Captures", keyword = "work:capture" }
+hide = { after_days = 7 }

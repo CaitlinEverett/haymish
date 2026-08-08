@@ -1,0 +1,70 @@
+# Haymish rule pack: photographer
+#
+# For professional shoots — weddings, portraits, events. This pack inverts
+# Haymish's usual assumption: consumer cleanup treats photos as clutter to be
+# reduced, but client work is inventory. So nothing here deletes, hides, or
+# archives anything. Every rule only files and tags.
+#
+# STRONGLY RECOMMENDED with this pack, in your rules.toml:
+#
+#     [global]
+#     posture = "archival"
+#
+# That makes deletion structurally unavailable — any rule with a delete stage is
+# refused at load. Belt and braces against a scheduled sweep ever touching a
+# client's photos.
+#
+# Install:  haymish packs install photographer
+# Remove:   haymish packs remove photographer
+#
+# Culling by date range is how you scope a shoot. Copy the picks rule per job:
+#
+#     [rule.smith-wedding]
+#     query = { after = 2026-06-14, before = 2026-06-16, min_score = 0.7 }
+#     file = { album = "Clients/Smith Wedding/Picks" }
+#
+# `before` is EXCLUSIVE: before = 2026-06-16 includes all of the 15th.
+
+[pack]
+name = "photographer"
+description = "Cull and organize professional shoots — files and tags only, never deletes"
+audience = "wedding, portrait, and event photographers"
+posture_hint = "archival"
+
+# ---------------------------------------------------------------------------
+# Culling by Apple's own curation scores. These are computed on-device for every
+# photo and cost nothing to read — no AI pass required.
+#
+# min_score is Apple's overall quality judgment; max_failure is its confidence
+# that the shot outright failed (closed eyes, severe blur, subject cut off).
+# Tune both against a shoot you've already culled by hand — that's the honest
+# way to find your own thresholds, since "good" is personal.
+
+# The keepers: high quality, unlikely to be a failed frame.
+[rule.picks]
+query = { min_score = 0.72, max_failure = 0.15 }
+file = { keyword = "pick" }
+
+# Probable rejects, flagged for a look — NOT deleted, NOT hidden. A second
+# opinion on your own culling, not a decision made for you.
+[rule.probable-rejects]
+query = { max_failure = 1.0, min_score = 0.0 }
+detector = "junk"
+report_only = true
+
+# Duplicates and near-identical frames. Report-only: in a burst of 40 frames of
+# the same kiss, which one is "the" one is exactly the judgment you're paid for.
+[rule.duplicate-frames]
+detector = "dupes"
+report_only = true
+
+# RAW files gathered for the editing pass.
+[rule.raw-originals]
+query = { raw = true }
+file = { keyword = "raw" }
+
+# Group shots — anything with several detected faces, useful for finding the
+# formals quickly.
+[rule.people-shots]
+query = { has_faces = true }
+file = { keyword = "has-people" }

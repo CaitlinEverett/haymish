@@ -18,9 +18,13 @@ class StageConfig:
     after_days: int = 0
 
 
+VALID_POSTURES = {"tidy", "archival"}
+
+
 @dataclass
 class Rule:
     name: str
+    pack: str | None = None              # which rule pack it came from, None for rules.toml
     query: dict = field(default_factory=dict)
     detector: str | None = None          # named detector (receipts, messages, dupes, junk)
     semantic: dict | None = None         # {query, min_score?, top?} — embedding match on the AI index
@@ -48,6 +52,10 @@ class Config:
     ai_planner_model: str
     rules: list[Rule]
     source_path: Path
+    # Defaulted so adding config fields doesn't break every constructor call.
+    # "tidy" reduces clutter and permits delete stages; "archival" refuses them
+    # outright, for libraries where a photo is inventory rather than clutter.
+    posture: str = "tidy"
 
     def rule(self, name: str) -> Rule:
         for r in self.rules:
@@ -189,6 +197,57 @@ def _parse_rule(name: str, raw: dict) -> Rule:
     )
 
 
+def _load_packs(packs_dir: Path | None = None) -> list[Rule]:
+    """Rules contributed by installed packs in ~/.haymish/packs/*.toml.
+
+    Packs exist so a profession's rule set can be installed, tried, and removed
+    as one unit -- deleting a file rather than picking apart a merged rules.toml.
+    Rule names are namespaced `pack:rule` so two packs (or a pack and your own
+    rules) can both define "receipts" without colliding. Inside a pack,
+    exclude_matched_by may use bare names; they resolve to that pack first.
+    """
+    from .paths import PACKS_DIR
+
+    packs_dir = packs_dir or PACKS_DIR
+    if not packs_dir.is_dir():
+        return []
+
+    rules: list[Rule] = []
+    for path in sorted(packs_dir.glob("*.toml")):
+        pack_name = path.stem
+        try:
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise ConfigError(f"pack {path.name} is not valid TOML: {e}") from None
+
+        if not bool(raw.get("pack", {}).get("enabled", True)):
+            continue
+
+        own = set(raw.get("rule", {}))
+        for name, body in raw.get("rule", {}).items():
+            rule = _parse_rule(name, body)
+            rule.pack = pack_name
+            rule.name = f"{pack_name}:{name}"
+            rule.exclude_matched_by = [
+                f"{pack_name}:{dep}" if dep in own else dep
+                for dep in rule.exclude_matched_by
+            ]
+            rules.append(rule)
+    return rules
+
+
+def pack_metadata(path: Path) -> dict:
+    """The [pack] table of a pack file — name, description, posture hint."""
+    try:
+        with open(path, "rb") as f:
+            meta = tomllib.load(f).get("pack", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    meta.setdefault("name", path.stem)
+    return meta
+
+
 def load_config(path: Path | None = None) -> Config:
     path = path or RULES_PATH
     if not path.exists():
@@ -209,12 +268,44 @@ def load_config(path: Path | None = None) -> Config:
     if planner_backend not in {"ollama", "claude"}:
         raise ConfigError('[global.ai].planner_backend must be "ollama" or "claude"')
 
+    posture = g.get("posture", "tidy")
+    if posture not in VALID_POSTURES:
+        raise ConfigError(
+            f'[global].posture must be one of {sorted(VALID_POSTURES)} — got {posture!r}. '
+            f'"tidy" reduces clutter (delete stages allowed); "archival" never deletes.'
+        )
+
     rules = [_parse_rule(name, body) for name, body in raw.get("rule", {}).items()]
+    rules += _load_packs()
+
     names = {r.name for r in rules}
+    seen: set[str] = set()
     for r in rules:
+        if r.name in seen:
+            source = f"pack {r.pack!r}" if r.pack else "rules.toml"
+            raise ConfigError(
+                f"duplicate rule name {r.name!r} (from {source}) — rename it, or disable "
+                f"the conflicting one with enabled = false"
+            )
+        seen.add(r.name)
+
+    for r in rules:
+        where = f"pack {r.pack}" if r.pack else "rules.toml"
         for dep in r.exclude_matched_by:
             if dep not in names:
-                raise ConfigError(f"[rule.{r.name}].exclude_matched_by references unknown rule {dep!r}")
+                raise ConfigError(
+                    f"[rule.{r.name}] ({where}).exclude_matched_by references unknown rule {dep!r}"
+                )
+        if r.delete and posture == "archival":
+            # The whole point of archival posture: for a photographer or anyone
+            # whose library is client work, an unattended path to deletion is a
+            # liability, not a feature. Refuse the config rather than quietly
+            # ignoring the stage -- silently dropping it would be worse.
+            raise ConfigError(
+                f"[rule.{r.name}] ({where}) has a delete stage, but [global].posture is "
+                f'"archival" — that posture never deletes. Remove the delete stage, or set '
+                f'posture = "tidy" if you do want deletion available.'
+            )
         if r.delete and not r.archive:
             raise ConfigError(
                 f"[rule.{r.name}] has a delete stage but no archive stage — deletion requires "
@@ -231,6 +322,7 @@ def load_config(path: Path | None = None) -> Config:
         library=library,
         backup=backup,
         report_dir=report_dir,
+        posture=posture,
         ollama_host=ollama.get("host", "http://localhost:11434"),
         # gemma3:4b is the smallest vision-capable gemma3 — right size for
         # per-photo yes/no classification and captioning at library scale.

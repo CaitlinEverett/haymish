@@ -7,6 +7,7 @@ RULES_PATH = APP_DIR / "rules.toml"
 CATALOG_PATH = APP_DIR / "catalog.db"
 ACTION_LOG_PATH = APP_DIR / "actions.jsonl"
 DEFAULT_REPORT_DIR = APP_DIR / "reports"
+PACKS_DIR = APP_DIR / "packs"          # installed rule packs, one .toml each
 
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 
@@ -14,3 +15,4 @@ DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 def ensure_app_dirs() -> None:
     APP_DIR.mkdir(exist_ok=True)
     DEFAULT_REPORT_DIR.mkdir(exist_ok=True)
+    PACKS_DIR.mkdir(exist_ok=True)

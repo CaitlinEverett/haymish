@@ -134,6 +134,184 @@ def _print_sweep_report(report, apply_: bool) -> None:
 
 
 @main.command()
+@click.argument("rule_name")
+def tune(rule_name):
+    """Show what a semantic rule would match at different thresholds.
+
+    Re-scoring uses the embeddings already cached by `haymish index`, so this is
+    instant — no inference, no waiting. Every photo you unchecked in review is a
+    known bad match, so where you've given feedback the table shows measured
+    precision rather than a guess. Where you haven't, it says so instead of
+    inventing a recommendation.
+    """
+    from .catalog import Catalog
+    from .library import all_photos, load_photosdb
+    from .tuning import format_report, rule_feedback, tune_semantic
+
+    config = _load_config()
+    known = {r.name for r in config.rules}
+    if rule_name not in known:
+        console.print(f"[red]Unknown rule:[/red] {rule_name!r}. Known: {sorted(known)}")
+        sys.exit(1)
+    rule = config.rule(rule_name)
+    if not rule.semantic:
+        console.print(
+            f"[yellow]{rule_name} has no semantic block — nothing to tune.[/yellow] "
+            f"Thresholds apply to content matching; this rule selects by "
+            f"{'detector' if rule.detector else 'query filters'} instead."
+        )
+        return
+
+    catalog = Catalog()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+        photos = all_photos(photosdb)
+
+    report = tune_semantic(config, catalog, photos, rule)
+    feedback = rule_feedback(catalog, rule_name)
+    catalog.close()
+
+    console.print(format_report(report))
+    if feedback.get("rejection_rate") is not None:
+        console.print(
+            f"\nYou've applied this rule to {feedback['applied']} photo(s) and "
+            f"rejected {feedback['rejected']} "
+            f"({feedback['rejection_rate']:.0%} rejected)."
+        )
+    if report.suggested is not None:
+        console.print(
+            f"\nTo use it, set [bold]min_score = {report.suggested}[/bold] under "
+            f"[bold]\\[rule.{rule_name}].semantic[/bold] in {config.source_path}."
+        )
+
+
+def _bundled_packs() -> dict:
+    """name -> Traversable for packs shipped with Haymish."""
+    import importlib.resources
+
+    try:
+        root = importlib.resources.files("haymish").joinpath("packs")
+        return {p.name[:-5]: p for p in root.iterdir() if p.name.endswith(".toml")}
+    except (FileNotFoundError, ModuleNotFoundError):
+        return {}
+
+
+@main.group()
+def packs():
+    """Install, inspect, and remove rule packs — profession-shaped rule sets.
+
+    A pack is one .toml file in ~/.haymish/packs/. Its rules are namespaced
+    `pack:rule`, so installing one can't collide with rules you wrote. Removing
+    a pack is deleting its file; nothing it did to your library is undone by
+    that (use `haymish undo` for actions).
+    """
+
+
+@packs.command("list")
+def packs_list():
+    """Show packs available to install and packs already installed."""
+    from .config import pack_metadata
+    from .paths import PACKS_DIR
+
+    bundled = _bundled_packs()
+    installed = {p.stem: p for p in PACKS_DIR.glob("*.toml")} if PACKS_DIR.is_dir() else {}
+
+    table = Table(title="Rule packs")
+    table.add_column("Pack")
+    table.add_column("Status")
+    table.add_column("What it's for")
+    for name in sorted(set(bundled) | set(installed)):
+        if name in installed:
+            meta = pack_metadata(installed[name])
+            status = "[green]installed[/green]"
+        else:
+            import tomllib
+            meta = tomllib.loads(bundled[name].read_text()).get("pack", {})
+            status = "available"
+        table.add_row(name, status, meta.get("description", ""))
+    console.print(table)
+    if installed:
+        console.print("[dim]Installed packs live in ~/.haymish/packs/ — edit them freely.[/dim]")
+
+
+@packs.command("install")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Overwrite an already-installed pack.")
+def packs_install(name, force):
+    """Copy a bundled pack into ~/.haymish/packs/ so its rules take effect."""
+    from .paths import PACKS_DIR, ensure_app_dirs
+
+    bundled = _bundled_packs()
+    if name not in bundled:
+        console.print(f"[red]No pack named {name!r}.[/red] Available: {sorted(bundled) or 'none'}")
+        sys.exit(1)
+
+    ensure_app_dirs()
+    dest = PACKS_DIR / f"{name}.toml"
+    if dest.exists() and not force:
+        console.print(f"{dest} already exists — use --force to overwrite "
+                      f"(you'll lose any edits you made to it).")
+        return
+    dest.write_text(bundled[name].read_text())
+
+    config = _load_config()
+    pack_rules = [r for r in config.rules if r.pack == name]
+    console.print(f"[green]Installed[/green] {name} → {dest}")
+    for r in pack_rules:
+        console.print(f"  {r.name}")
+    console.print(
+        f"\nNothing has run yet. Try it read-only first:\n"
+        f"  [bold]haymish sweep[/bold]            (dry run, all rules)\n"
+        f"  [bold]haymish review[/bold]           (thumbnails, apply what you check)"
+    )
+    hint = None
+    import tomllib
+    meta = tomllib.loads(dest.read_text()).get("pack", {})
+    if meta.get("posture_hint") == "archival" and config.posture != "archival":
+        # Escape the TOML table headers — rich would otherwise parse [global] as
+        # a style tag and silently swallow it, leaving instructions that don't work.
+        hint = ('This pack is meant for work you must never lose. Consider setting\n'
+                '  \\[global]\n  posture = "archival"\n'
+                'in ~/.haymish/rules.toml — that makes deletion structurally unavailable.')
+    if hint:
+        console.print(f"\n[yellow]{hint}[/yellow]")
+
+
+@packs.command("remove")
+@click.argument("name")
+def packs_remove(name):
+    """Delete an installed pack. Its rules stop applying; past actions are untouched."""
+    from .paths import PACKS_DIR
+
+    dest = PACKS_DIR / f"{name}.toml"
+    if not dest.exists():
+        console.print(f"[red]{name!r} isn't installed.[/red]")
+        sys.exit(1)
+    dest.unlink()
+    console.print(f"Removed {dest}.")
+    console.print("[dim]Albums and keywords it already applied are still there — "
+                  "use `haymish undo` if you want those reversed.[/dim]")
+
+
+@packs.command("show")
+@click.argument("name")
+def packs_show(name):
+    """Print a pack's rules and what each would do."""
+    from .paths import PACKS_DIR
+
+    dest = PACKS_DIR / f"{name}.toml"
+    bundled = _bundled_packs()
+    if dest.exists():
+        console.print(dest.read_text())
+    elif name in bundled:
+        console.print(bundled[name].read_text())
+        console.print(f"[dim](not installed — `haymish packs install {name}`)[/dim]")
+    else:
+        console.print(f"[red]No pack named {name!r}.[/red]")
+        sys.exit(1)
+
+
+@main.command()
 @click.option("--gap-hours", default=14.0, show_default=True,
               help="Start a new event after this long a break between photos.")
 @click.option("--km", "max_km", default=60.0, show_default=True,
@@ -683,7 +861,7 @@ def archive():
 
     config = _load_config()
     if not config.backup:
-        console.print("[red]No [global].backup configured in rules.toml — nothing to archive to.[/red]")
+        console.print("[red]No \\[global].backup configured in rules.toml — nothing to archive to.[/red]")
         sys.exit(1)
 
     catalog = Catalog()
