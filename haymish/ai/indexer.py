@@ -101,6 +101,10 @@ class IndexStats:
     embedded: int = 0
     already_indexed: int = 0
     caption_workers: int = 1
+    # Planned work, known before anything runs -- so the UI can say what it's
+    # about to do instead of only what it did.
+    needs_embedding: int = 0
+    needs_caption: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -159,12 +163,15 @@ def vector_to_blob(vector: list[float]) -> tuple[bytes, int]:
 
 def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool = True,
                  limit: int | None = None, progress=None,
-                 concurrency: int | None = None) -> IndexStats:
+                 concurrency: int | None = None, plan=None) -> IndexStats:
     """Captions (optional) then embeddings, incremental against the catalog.
     concurrency caps parallel caption requests; None auto-sizes to the machine.
-    progress(done, total, phase) is called per photo for UI. Caption failures are
-    per-photo (logged, photo still gets embedded from OCR/labels); embedding
-    failures abort — without the embedding model there's no index to build."""
+    progress(done, total, phase) is called per photo for UI. plan(stats, total,
+    config) is called once before any work, so a caller can report what is about
+    to happen -- a run that turns out to have nothing to do should say so, not
+    show a progress bar that advances over photos it silently skips. Caption
+    failures are per-photo (logged, photo still gets embedded from OCR/labels);
+    embedding failures abort -- without the embedding model there's no index."""
     log = _IndexLog(config)
     stats = IndexStats()
     embedded = catalog.embedded_uuids(config.ai_embed_model)
@@ -178,6 +185,8 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     if limit is not None:
         todo = todo[:limit]
     total = len(todo)
+    stats.needs_embedding = sum(1 for p in todo if p.uuid not in embedded)
+    stats.needs_caption = (sum(1 for p in todo if p.uuid not in captioned) if captions else 0)
 
     if captions:
         vision_ok = ollama_client.model_available(config.ollama_host, config.ai_vision_model)
@@ -228,6 +237,8 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     # caption without its embedding is useless -- find/ask read embeddings. This
     # way an interrupted run leaves behind a smaller but fully working index
     # instead of hours of captions and nothing searchable.
+    if plan is not None:
+        plan(stats, total, config)
     log.start(total, workers, captions)
     started = time.monotonic()
     done = 0

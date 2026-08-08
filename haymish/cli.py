@@ -528,10 +528,27 @@ def index(no_captions, limit, concurrency, reindex_captions):
                 tasks[phase] = prog.add_task(labels.get(phase, "Indexing"), total=total)
             prog.update(tasks[phase], completed=done)
 
+        def on_plan(stats, total, cfg):
+            # Printed before any work: what's already done, what's left, and by
+            # which model. A run with nothing to do must say so plainly rather
+            # than showing a bar that advances over photos it's skipping.
+            prog.console.print(
+                f"[dim]{stats.already_indexed:,} already indexed · "
+                f"{stats.needs_embedding:,} to embed ({cfg.ai_embed_model})"
+                + (f" · {stats.needs_caption:,} to caption ({cfg.ai_vision_model})"
+                   if not no_captions else "")
+                + "[/dim]"
+            )
+            if total and not stats.needs_embedding and not stats.needs_caption:
+                prog.console.print(
+                    "[yellow]Nothing to do — every photo already has an embedding "
+                    "for this model.[/yellow]"
+                )
+
         try:
             stats = index_photos(config, catalog, photos, captions=not no_captions,
                                   limit=limit, progress=on_progress,
-                                  concurrency=concurrency)
+                                  concurrency=concurrency, plan=on_plan)
         except AIError as e:
             console.print(f"[red]{e}[/red]")
             catalog.close()
