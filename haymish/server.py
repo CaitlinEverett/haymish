@@ -42,6 +42,37 @@ DEFAULT_PORT = 8787
 _SESSION_LIMIT = 20  # oldest preview sessions get dropped past this
 
 
+def _explain_library_error(error: Exception, library_path) -> str:
+    """Turn a library-load failure into something a person can act on.
+
+    The common case is a permission error: the daemon can read its own config
+    but not the Photos database. That surfaces from osxphotos as a bare
+    'Operation not permitted' / 'Error copying ... Photos.sqlite', which tells
+    the user nothing. Note the daemon can lack Full Disk Access even when the
+    terminal that launched it has it -- it runs in its own session, so macOS
+    may attribute it separately.
+    """
+    text = str(error)
+    permission_denied = (
+        isinstance(error, PermissionError)
+        or "Operation not permitted" in text
+        or "Error copying" in text
+    )
+    if permission_denied:
+        return (
+            "Full Disk Access is missing for the Haymish daemon, so it can't read "
+            "the Photos database. Fix: System Settings → Privacy & Security → Full "
+            "Disk Access → enable your terminal app, then quit that app completely "
+            "(⌘Q, not just the window) and run `haymish serve` again from it. "
+            "Running `haymish serve` in the foreground of an already-authorized "
+            "terminal is the most reliable way to get the daemon authorized."
+        )
+    if isinstance(error, FileNotFoundError) or "no such file" in text.lower():
+        return (f"No Photos library at {library_path} — set [global].library in "
+                f"~/.haymish/rules.toml if it lives somewhere else.")
+    return f"{type(error).__name__}: {error}"
+
+
 @dataclass
 class Job:
     id: str
@@ -71,7 +102,7 @@ class ServeState:
             try:
                 self.photosdb = library.load_photosdb(self.config.library)
             except Exception as e:
-                self.photosdb_error = f"{type(e).__name__}: {e}"
+                self.photosdb_error = _explain_library_error(e, self.config.library)
             finally:
                 self.photosdb_ready.set()
 

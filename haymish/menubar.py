@@ -79,9 +79,37 @@ def _format_status(run: dict | None) -> str:
     return f"Last {run.get('mode', 'run')}: {when}"
 
 
+def _icon_path() -> str | None:
+    """The broom-head PNG shipped in the package, or None to fall back to text.
+
+    Passed to rumps with template=True so macOS treats it as a template image:
+    it recolors the black-and-alpha art for light/dark menu bars, for the
+    highlighted state when the menu is open, and for accessibility contrast
+    settings. An emoji can't do any of that -- it renders one fixed color and
+    disappears against some wallpapers and in dark mode.
+    """
+    import importlib.resources
+
+    try:
+        path = importlib.resources.files("haymish").joinpath("static/broom.png")
+        return str(path) if path.is_file() else None
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        return None
+
+
 class HaymishMenuBarApp(rumps.App):
     def __init__(self):
-        super().__init__("Haymish", title="🧹", quit_button="Quit")
+        icon = _icon_path()
+        # title=None when we have an icon, so the bar shows just the glyph;
+        # falling back to a short text label keeps it findable if the icon is
+        # missing (e.g. running from a source tree without the asset).
+        super().__init__(
+            "Haymish",
+            title=None if icon else "haymish",
+            icon=icon,
+            template=True,
+            quit_button="Quit",
+        )
         self._sweep_running = False
 
         self.status_item = rumps.MenuItem("Loading status…")
