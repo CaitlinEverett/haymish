@@ -22,43 +22,51 @@ SCALE = 8
 
 
 def draw_broom(size: int) -> Image.Image:
-    """A broom head: tapered ferrule up top, bristles fanning below."""
+    """A broom head, seen straight on: handle stub, binding band, bristles.
+
+    Readability notes for 18pt, learned the hard way -- the first version read
+    as a badminton shuttlecock:
+      * The handle stub is what distinguishes a broom from a shuttlecock or a
+        bucket. It has to be present even though this is a "head only" mark.
+      * Modest flare, not a wide fan. A wide triangular skirt is the exact
+        shuttlecock silhouette.
+      * A transparent gap between band and bristles reads at small size far
+        better than a drawn outline, which fills in when downsampled.
+      * Bristle gaps run the full height of the block, so they survive as
+        distinct strokes rather than blurring into a solid mass.
+    """
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     u = size / 18.0  # one "point" in this image's pixels
+    black = (0, 0, 0, 255)
+    clear = (0, 0, 0, 0)
 
-    # Everything is nudged up slightly (dy) so the drawn mass sits optically
-    # centered in the square rather than low, which reads as misaligned next to
-    # other menu bar items.
-    dy = -0.5 * u
+    # Handle stub -- narrow, clearly narrower than the band beneath it.
+    d.rectangle([7.9 * u, 1.6 * u, 10.1 * u, 5.0 * u], fill=black)
 
-    # Ferrule (the metal band) -- a trapezoid, wider at the bottom.
-    ferrule = [
-        (6.6 * u, 3.2 * u + dy),
-        (11.4 * u, 3.2 * u + dy),
-        (12.6 * u, 8.2 * u + dy),
-        (5.4 * u, 8.2 * u + dy),
-    ]
-    d.polygon(ferrule, fill=(0, 0, 0, 255))
+    # Binding band -- the widest solid horizontal element; anchors the shape.
+    d.rectangle([5.6 * u, 5.0 * u, 12.4 * u, 7.6 * u], fill=black)
 
-    # Bristle block -- a wider trapezoid fanning out under the ferrule.
-    bristles = [
-        (5.4 * u, 8.8 * u + dy),
-        (12.6 * u, 8.8 * u + dy),
-        (15.2 * u, 15.6 * u + dy),
-        (2.8 * u, 15.6 * u + dy),
-    ]
-    d.polygon(bristles, fill=(0, 0, 0, 255))
+    # Bristle block -- gentle flare (6.8u wide at top, 10.4u at bottom), flat
+    # bottom edge. Starts below a transparent gap so the band stays distinct.
+    top_l, top_r = 5.6 * u, 12.4 * u
+    bot_l, bot_r = 3.8 * u, 14.2 * u
+    top_y, bot_y = 8.6 * u, 16.0 * u
+    d.polygon([(top_l, top_y), (top_r, top_y), (bot_r, bot_y), (bot_l, bot_y)], fill=black)
 
-    # Notch the bristle ends so it reads as a broom, not a bucket. Cutting with
-    # transparent wedges keeps the silhouette crisp when downsampled.
-    n = 5
-    for i in range(1, n):
-        x = 2.8 * u + (15.2 - 2.8) * u * i / n
-        half = 0.42 * u
+    # Bristle separations: full-height wedges that follow the flare, so each
+    # gap stays open at the bottom where the block is widest.
+    # Gap width is tuned for the @1x (18px) render, where each gap is barely a
+    # pixel: wider cuts hollow the block out and it reads as a fence or crown.
+    for i in (1, 2, 3):
+        t = i / 4.0
+        xt = top_l + (top_r - top_l) * t
+        xb = bot_l + (bot_r - bot_l) * t
+        half_t, half_b = 0.16 * u, 0.28 * u
         d.polygon(
-            [(x - half, 15.8 * u + dy), (x + half, 15.8 * u + dy), (x, 12.4 * u + dy)],
-            fill=(0, 0, 0, 0),
+            [(xt - half_t, top_y - 0.1 * u), (xt + half_t, top_y - 0.1 * u),
+             (xb + half_b, bot_y + 0.1 * u), (xb - half_b, bot_y + 0.1 * u)],
+            fill=clear,
         )
     return img
 
