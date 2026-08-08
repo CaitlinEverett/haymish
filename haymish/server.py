@@ -458,6 +458,69 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             job = state.start_job("apply", run)
             self._json({"job": job.id})
 
+        elif path == "/api/galleries":
+            min_photos = int(body.get("min_photos") or 40)
+            gap_hours = float(body.get("gap_hours") or 14.0)
+            max_km = float(body.get("max_km") or 60.0)
+            limit = int(body.get("limit") or 40)
+
+            def run(job: Job):
+                from .events import cluster_events, pick_representative
+
+                photosdb = state.require_photosdb()
+                photos = library.all_photos(photosdb)
+                by_uuid = {p.uuid: p for p in photos}
+                job.progress = {"phase": "clustering"}
+                events = cluster_events(photos, max_gap_hours=gap_hours,
+                                         max_km=max_km, min_photos=min_photos)
+                events.sort(key=lambda e: e.significance, reverse=True)
+                events = events[:limit]
+
+                # Only the cover thumbnail is generated up front. Member
+                # thumbnails are made on demand when a gallery is expanded --
+                # rendering 11,000 of them to draw 40 covers would be absurd.
+                out = []
+                for i, e in enumerate(events):
+                    members = [by_uuid[u] for u in e.uuids if u in by_uuid]
+                    cover = pick_representative(members)
+                    if cover is not None:
+                        ensure_thumbnail(cover)
+                    out.append({
+                        "key": e.key, "label": e.label, "place": e.place,
+                        "photo_count": e.photo_count, "days": e.days,
+                        "start": e.start.isoformat(), "end": e.end.isoformat(),
+                        "cover": cover.uuid if cover is not None else None,
+                        "uuids": e.uuids,
+                    })
+                    job.progress = {"phase": "covers", "done": i + 1, "total": len(events)}
+                return {"events": out, "total_events": len(events)}
+
+            job = state.start_job("galleries", run)
+            self._json({"job": job.id})
+
+        elif path == "/api/gallery/thumbs":
+            # Thumbnails for one expanded gallery, generated on demand.
+            uuids = list(body.get("uuids") or [])[:400]
+
+            def run(job: Job):
+                photosdb = state.require_photosdb()
+                by_uuid = {p.uuid: p for p in library.all_photos(photosdb)}
+                ready = []
+                for i, uuid in enumerate(uuids):
+                    photo = by_uuid.get(uuid)
+                    if photo is not None:
+                        ensure_thumbnail(photo)
+                        ready.append({
+                            "uuid": uuid,
+                            "filename": getattr(photo, "original_filename", "") or uuid,
+                            "thumb": _thumbnail_path(uuid).is_file(),
+                        })
+                    job.progress = {"phase": "thumbnails", "done": i + 1, "total": len(uuids)}
+                return {"photos": ready}
+
+            job = state.start_job("gallery-thumbs", run)
+            self._json({"job": job.id})
+
         elif path == "/api/index/build":
             captions = bool(body.get("captions", True))
             limit = body.get("limit")
