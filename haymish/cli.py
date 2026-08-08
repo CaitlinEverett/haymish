@@ -134,6 +134,72 @@ def _print_sweep_report(report, apply_: bool) -> None:
 
 
 @main.command()
+@click.option("--gap-hours", default=14.0, show_default=True,
+              help="Start a new event after this long a break between photos.")
+@click.option("--km", "max_km", default=60.0, show_default=True,
+              help="Start a new event when photos move farther than this.")
+@click.option("--min-photos", default=5, show_default=True,
+              help="Ignore clusters smaller than this.")
+@click.option("--limit", default=25, show_default=True, help="How many events to show.")
+@click.option("--create", "album_prefix", default=None, metavar="PREFIX",
+              help='File each event into an album under PREFIX (e.g. "Trips") — '
+                   "opens the review UI so you confirm before anything is created.")
+@click.option("--no-open", is_flag=True, help="With --create: print the URL but don't open a browser.")
+def galleries(gap_hours, max_km, min_photos, limit, album_prefix, no_open):
+    """Find trips and events by when and where photos were taken.
+
+    Pure metadata — no AI, no index needed. Clusters on time gaps and distance,
+    so a weekend away or a day's shoot comes out as one event. Read-only unless
+    you pass --create, which routes every event through the usual thumbnail
+    review before any album is made.
+    """
+    from .catalog import Catalog
+    from .events import cluster_events, summarize
+    from .library import all_photos, load_photosdb
+
+    config = _load_config()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+        photos = all_photos(photosdb)
+
+    events = cluster_events(photos, max_gap_hours=gap_hours, max_km=max_km,
+                             min_photos=min_photos)
+    if not events:
+        console.print("No events found — try a smaller --min-photos or a larger --gap-hours.")
+        return
+
+    console.print(summarize(events, limit=limit))
+    console.print(f"\n[dim]{len(events)} event(s) from {len(photos):,} photos.[/dim]")
+
+    if album_prefix is None:
+        console.print('[dim]Add --create "Trips" to file these into albums (with review first).[/dim]')
+        return
+
+    # One ephemeral rule per event, matched by explicit uuid set, so this goes
+    # through the same preview -> review -> apply path as everything else.
+    from .config import Rule
+    from .review import run_review
+
+    rules = [
+        Rule(name=e.key, query={"uuids": e.uuids},
+             file={"album": f"{album_prefix.rstrip('/')}/{e.label}"})
+        for e in events[:limit]
+    ]
+    catalog = Catalog()
+
+    def on_ready(url: str) -> None:
+        console.print(f"Review: [bold]{url}[/bold]")
+
+    report = run_review(config, catalog, photosdb, auto_open=not no_open,
+                        on_ready=on_ready, rules_override=rules)
+    catalog.close()
+    if report is None:
+        console.print("Nothing created (cancelled).")
+    else:
+        _print_sweep_report(report, apply_=True)
+
+
+@main.command()
 @click.argument("rule", required=False)
 @click.option("--apply", "apply_", is_flag=True, help="Actually perform actions (default: dry-run).")
 def sweep(rule, apply_):

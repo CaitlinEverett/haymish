@@ -63,7 +63,7 @@ VALID_QUERY_KEYS = {
     # time — relative (drifts each run) and absolute (a fixed shoot or trip)
     "min_age_days", "max_age_days", "after", "before",
     # organization
-    "albums", "exclude_albums", "keywords",
+    "albums", "exclude_albums", "keywords", "uuids",
     # place
     "place", "near", "has_location",
     # people

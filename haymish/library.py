@@ -209,6 +209,11 @@ def matches_query(photo, query: dict, now: dt.datetime | None = None) -> bool:
         return False
     if "keywords" in query and not set(query["keywords"]) & set(photo.keywords or []):
         return False
+    # An explicit photo set. Mainly for ephemeral rules built in code (e.g. the
+    # per-event rules `haymish galleries` constructs), so that work still flows
+    # through the normal preview -> review -> apply path instead of a side door.
+    if "uuids" in query and photo.uuid not in set(query["uuids"]):
+        return False
 
     # -- absolute dates ------------------------------------------------------
     # min/max_age_days is relative and drifts every run; a shoot or a trip is a
