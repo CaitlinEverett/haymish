@@ -107,7 +107,39 @@
   .gal-members .thumb{border:1px solid var(--line); border-radius:6px; overflow:hidden;}
   .gal-more{margin-top:.7rem;}
 
+  /* -- gallery editing (save picker, album name, per-photo removal, decline) -- */
+  .gal-pick{position:absolute; top:8px; left:8px; width:18px; height:18px; z-index:3; margin:0;
+    accent-color:var(--accent); cursor:pointer;}
+  .gal-note{font-size:10.5px; color:var(--amber); margin:0 8px 5px; overflow-wrap:anywhere;}
+  .gal-edit{margin:2px 8px 8px;}
+  .gal-row{display:flex; justify-content:space-between; align-items:baseline; gap:6px; margin-bottom:3px;}
+  .gal-lbl{font-size:10.5px; color:var(--ink-3);}
+  input[type=text].gal-album{width:100%; flex:none; font-size:12.5px; padding:.3rem .45rem; cursor:text;}
+  .gal-declined{cursor:default; display:flex; flex-direction:column; justify-content:center;
+    gap:.35rem; padding:.8rem .9rem;}
+  .gal-declined .link-btn{align-self:flex-start;}
+  .gal-member{position:relative;}
+  .gal-member.gal-removed .thumb{opacity:.28; filter:grayscale(1);}
+  .gal-member.gal-removed{outline:1px dashed var(--ink-3); outline-offset:-1px; border-radius:6px;}
+  .gal-x{position:absolute; top:3px; right:3px; z-index:2; width:20px; height:20px; padding:0;
+    line-height:1; border-radius:999px; border:1px solid var(--line); background:var(--card);
+    color:var(--ink-2); font:inherit; font-size:11px; cursor:pointer; opacity:0;}
+  .gal-member:hover .gal-x, .gal-member.gal-removed .gal-x, .gal-x:focus{opacity:1;}
+  .gal-x:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+  .gal-bar{display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-top:1rem;
+    background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.7rem 1rem;}
+  /* display:flex would otherwise beat the UA [hidden] rule and pin the bar open */
+  .gal-bar[hidden]{display:none;}
+  .gal-bar .count{font-size:14px; color:var(--ink-2);}
+  .gal-bar .hint{font-size:12px; color:var(--ink-3); flex:1;}
+  .gal-bar .status{font-size:13px; color:var(--ink-2);}
+
   /* -- apply bar -- */
+  /* The UA's [hidden]{display:none} is a bare attribute selector, so .bar's
+     display:flex outranks it and the apply bar stayed visible ("0 selected ·
+     Apply selected") with no review session open. Class+attribute outranks the
+     class alone, so this wins wherever it sits. */
+  .bar[hidden]{display:none;}
   .bar{position:fixed; bottom:0; left:0; right:0; background:var(--card); border-top:1px solid var(--line);
     padding:.9rem 1.5rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; z-index:5;}
   .bar .count{font-size:14px; color:var(--ink-2);}
@@ -228,6 +260,13 @@
     <p class="progress" id="gallery-progress"></p>
     <p class="sub" id="gallery-summary" hidden></p>
     <div id="gallery-root"></div>
+    <div class="gal-bar" id="gallery-bar" hidden>
+      <span class="count" id="gal-sel-count">Nothing selected</span>
+      <span class="hint">Only checked galleries are saved. Removed photos stay in your library.</span>
+      <span class="status" id="gallery-save-status"></span>
+      <button class="action" id="gallery-save-btn" type="button" disabled>Save 0 galleries</button>
+    </div>
+    <div id="gallery-outcome"></div>
   </section>
 
   <section class="block">
@@ -667,8 +706,52 @@ const galleryShowAll = new Set();    // event keys rendered past the cap
 let galleryExpanded = null;          // key of the one expanded gallery, or null
 let galleryLoading = null;           // key currently fetching member thumbs
 
+// ---- editing state (kept in JS, not the DOM, because every state change
+// re-renders the whole grid and would otherwise throw typed album names away) --
+const galleryAlbums = new Map();     // key -> album name as edited by the user
+const galleryChecked = new Set();    // keys opted in to saving (default: none)
+const galleryRemoved = new Map();    // key -> Set of uuids removed this session
+const galleryDeclined = new Set();   // keys declined this session (undo still offered)
+
+// Anything focusable that lives inside a gal-card: activating it must never
+// reach the card's expand/collapse handlers. Covers the Space-in-a-text-field
+// case, which would otherwise scroll-and-toggle instead of typing a space.
+const GAL_CONTROL = 'input, button, label, select, textarea, a';
+
+function galleryRemovedSet(key) {
+  let s = galleryRemoved.get(key);
+  if (!s) { s = new Set(); galleryRemoved.set(key, s); }
+  return s;
+}
+
+// photo_count is what the server found; subtract what the user pulled out here.
+function galleryCount(ev) {
+  const removed = galleryRemoved.get(ev.key);
+  return Math.max(0, (ev.photo_count || 0) - (removed ? removed.size : 0));
+}
+
+function galleryDefaultAlbum(ev) {
+  return 'Trips/' + String(ev.label || 'Untitled').trim();
+}
+
+function galleryAlbumValue(ev) {
+  if (galleryAlbums.has(ev.key)) return galleryAlbums.get(ev.key);
+  return (ev.album && String(ev.album).trim()) ? ev.album : galleryDefaultAlbum(ev);
+}
+
+// `excluded` is what the server already filtered out on previous runs; the
+// session count is what's dimmed on screen right now and still undoable.
+function galleryRemovedNote(ev) {
+  const bits = [];
+  const prev = (ev.excluded || []).length;
+  if (prev) bits.push(prev + ' photo' + (prev === 1 ? '' : 's') + ' previously removed');
+  const now = (galleryRemoved.get(ev.key) || new Set()).size;
+  if (now) bits.push(now + ' removed here');
+  return bits.join(' · ');
+}
+
 function galleryCaption(ev) {
-  const n = ev.photo_count || 0;
+  const n = galleryCount(ev);
   const bits = [n + ' photo' + (n === 1 ? '' : 's')];
   const d = ev.days || 0;
   if (d) bits.push(d + ' day' + (d === 1 ? '' : 's'));
@@ -689,18 +772,42 @@ function galleryTooltip(ev) {
 const THUMB_FALLBACK =
   ' onerror="this.parentNode.innerHTML=\'<div class=&quot;no-thumb&quot;>no preview</div>\'"';
 
+function galleryDeclinedHtml(ev, idx) {
+  return '<div class="card gal-declined">' +
+    '<p class="filename" title="' + esc(ev.label) + '">' + esc(ev.label) + '</p>' +
+    '<p class="detail">Declined — won\'t be suggested again.</p>' +
+    '<button type="button" class="link-btn" data-gal-undecline="' + idx + '">Undo</button>' +
+    '</div>';
+}
+
 function galleryCardHtml(ev, idx) {
+  if (galleryDeclined.has(ev.key)) return galleryDeclinedHtml(ev, idx);
   const open = galleryExpanded === ev.key;
   const cover = ev.cover
     ? '<img src="/thumb/' + encodeURIComponent(ev.cover) + '" alt="Cover photo for ' +
       esc(ev.label) + '" loading="lazy"' + THUMB_FALLBACK + '>'
     : noThumbTile();
+  const note = galleryRemovedNote(ev);
   return '<div class="card gal-card" role="button" tabindex="0" data-gal-idx="' + idx + '"' +
     ' aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="gal-panel-' + idx + '"' +
     ' title="' + esc(galleryTooltip(ev)) + '">' +
+    '<input type="checkbox" class="gal-pick" data-gal-pick="' + idx + '"' +
+      (galleryChecked.has(ev.key) ? ' checked' : '') +
+      ' aria-label="Save ' + esc(ev.label) + '">' +
     '<div class="thumb">' + cover + '</div>' +
     '<p class="filename" title="' + esc(ev.label) + '">' + esc(ev.label) + '</p>' +
     '<p class="detail">' + esc(galleryCaption(ev)) + '</p>' +
+    '<p class="gal-note" data-gal-note="' + idx + '"' + (note ? '' : ' hidden') + '>' +
+      esc(note) + '</p>' +
+    '<div class="gal-edit">' +
+      '<div class="gal-row">' +
+        '<label class="gal-lbl" for="gal-album-' + idx + '">Album</label>' +
+        '<button type="button" class="link-btn" data-gal-decline="' + idx + '">Not an event</button>' +
+      '</div>' +
+      '<input type="text" class="gal-album" id="gal-album-' + idx + '" data-gal-album="' + idx + '"' +
+        ' value="' + esc(galleryAlbumValue(ev)) + '" placeholder="Album name"' +
+        ' autocomplete="off" spellcheck="false">' +
+    '</div>' +
     '</div>';
 }
 
@@ -715,19 +822,29 @@ function galleryPanelHtml(ev, idx) {
     } else {
       const showAll = galleryShowAll.has(ev.key);
       const shown = showAll ? photos : photos.slice(0, GALLERY_CAP);
+      const removed = galleryRemovedSet(ev.key);
       body = '<div class="gal-members">' + shown.map(p => {
+        const name = p.filename || 'photo';
         const img = p.thumb
-          ? '<img src="/thumb/' + encodeURIComponent(p.uuid) + '" alt="' + esc(p.filename || 'photo') +
+          ? '<img src="/thumb/' + encodeURIComponent(p.uuid) + '" alt="' + esc(name) +
             '" loading="lazy"' + THUMB_FALLBACK + '>'
           : noThumbTile();
-        return '<div class="thumb" title="' + esc(p.filename || '') + '">' + img + '</div>';
+        const out = removed.has(p.uuid);
+        return '<div class="gal-member' + (out ? ' gal-removed' : '') +
+          '" data-uuid="' + esc(p.uuid) + '" data-name="' + esc(name) + '">' +
+          '<div class="thumb" title="' + esc(p.filename || '') + '">' + img + '</div>' +
+          '<button type="button" class="gal-x" data-gal-remove="1"' +
+          ' aria-pressed="' + (out ? 'true' : 'false') + '"' +
+          ' aria-label="' + (out ? 'Restore ' : 'Remove ') + esc(name) + '">' +
+          (out ? '↺' : '✕') + '</button>' +
+          '</div>';
       }).join('') + '</div>';
       const notes = [];
       if (!showAll && photos.length > shown.length) {
         notes.push('<button type="button" class="link-btn" data-gal-action="show-all">Show all ' +
           photos.length + '</button>');
       }
-      const count = ev.photo_count || 0;
+      const count = galleryCount(ev);
       if (count > photos.length) {
         notes.push('<span class="muted">Previewing the first ' + photos.length + ' of ' +
           count + ' photos.</span>');
@@ -737,15 +854,39 @@ function galleryPanelHtml(ev, idx) {
       }
     }
   }
-  return '<div class="gal-panel" id="gal-panel-' + idx + '" role="region" aria-label="' +
-    esc(ev.label) + '">' +
+  const note = galleryRemovedNote(ev);
+  return '<div class="gal-panel" id="gal-panel-' + idx + '" data-gal-panel-idx="' + idx + '"' +
+    ' role="region" aria-label="' + esc(ev.label) + '">' +
     '<div class="gal-panel-head"><div>' +
     '<h3>' + esc(ev.label) + '</h3>' +
-    '<p class="rule-meta">' + esc([ev.place, galleryWhen(ev), galleryCaption(ev)]
-      .filter(Boolean).join(' · ')) + '</p>' +
+    '<p class="rule-meta" data-gal-meta="' + idx + '">' + esc(galleryMetaText(ev)) + '</p>' +
+    '<p class="gal-note" data-gal-note="' + idx + '"' + (note ? '' : ' hidden') + '>' +
+      esc(note) + '</p>' +
     '</div><div class="rule-actions">' +
+    '<button type="button" class="link-btn" data-gal-decline="' + idx + '">Not an event</button>' +
     '<button type="button" class="link-btn" data-gal-action="collapse">Collapse</button>' +
     '</div></div>' + body + '</div>';
+}
+
+function galleryMetaText(ev) {
+  return [ev.place, galleryWhen(ev), galleryCaption(ev)].filter(Boolean).join(' · ');
+}
+
+// Removing a photo only moves numbers, so patch them in place rather than
+// re-rendering -- a full render would yank focus off the button just clicked.
+function updateGalleryMeta(idx) {
+  const ev = galleryEvents[idx];
+  if (!ev) return;
+  const root = $('gallery-root');
+  const detail = root.querySelector('[data-gal-idx="' + idx + '"] .detail');
+  if (detail) detail.textContent = galleryCaption(ev);
+  const meta = root.querySelector('[data-gal-meta="' + idx + '"]');
+  if (meta) meta.textContent = galleryMetaText(ev);
+  const note = galleryRemovedNote(ev);
+  root.querySelectorAll('[data-gal-note="' + idx + '"]').forEach(el => {
+    el.textContent = note;
+    el.hidden = !note;
+  });
 }
 
 function renderGalleries() {
@@ -754,6 +895,7 @@ function renderGalleries() {
   if (!galleryEvents.length) {
     root.innerHTML = '<p class="muted">No galleries found — try a lower minimum.</p>';
     summary.hidden = true;
+    updateGalleryBar();
     return;
   }
   summary.hidden = false;
@@ -766,6 +908,25 @@ function renderGalleries() {
     if (galleryExpanded === ev.key) html += galleryPanelHtml(ev, i);
   });
   root.innerHTML = html + '</div>';
+  updateGalleryBar();
+}
+
+function gallerySelection() {
+  return galleryEvents.filter(ev => galleryChecked.has(ev.key) && !galleryDeclined.has(ev.key));
+}
+
+function updateGalleryBar() {
+  const bar = $('gallery-bar'), btn = $('gallery-save-btn');
+  if (!galleryEvents.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const picks = gallerySelection();
+  let photos = 0;
+  for (const ev of picks) photos += galleryCount(ev);
+  btn.disabled = !picks.length;
+  btn.textContent = 'Save ' + picks.length + ' galler' + (picks.length === 1 ? 'y' : 'ies');
+  $('gal-sel-count').textContent = picks.length
+    ? picks.length + ' selected · ' + photos + ' photo' + (photos === 1 ? '' : 's')
+    : 'Nothing selected';
 }
 
 // Every state change re-renders the grid, which throws away the focused node --
@@ -812,36 +973,126 @@ async function toggleGallery(idx) {
   }
 }
 
-$('gallery-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const btn = $('gallery-btn'), prog = $('gallery-progress'), minEl = $('gallery-min');
-  let minPhotos = parseInt(minEl.value, 10);
-  if (!Number.isFinite(minPhotos) || minPhotos < 1) { minPhotos = 40; minEl.value = '40'; }
-  btn.disabled = true;
+function galleryMinPhotos() {
+  const minEl = $('gallery-min');
+  let n = parseInt(minEl.value, 10);
+  if (!Number.isFinite(n) || n < 1) { n = 40; minEl.value = '40'; }
+  return n;
+}
+
+// Shared by the Find-galleries button and the post-save refresh. Resets all
+// editing state -- the server has just changed what it will hand back.
+async function scanGalleries(minPhotos) {
+  const prog = $('gallery-progress');
   prog.textContent = 'starting…';
   try {
     const result = await runJob('/api/galleries', { min_photos: minPhotos },
       p => { prog.textContent = phaseText(p); });
-    prog.textContent = '';
     galleryEvents = (result && result.events) || [];
     galleryTotal = (result && result.total_events) || galleryEvents.length;
-    galleryMembers.clear();
-    galleryShowAll.clear();
-    galleryExpanded = null;
-    galleryLoading = null;
-    renderGalleries();
+  } finally {
+    prog.textContent = '';
+  }
+  galleryMembers.clear();
+  galleryShowAll.clear();
+  galleryAlbums.clear();
+  galleryChecked.clear();
+  galleryRemoved.clear();
+  galleryDeclined.clear();
+  galleryExpanded = null;
+  galleryLoading = null;
+  renderGalleries();
+}
+
+$('gallery-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('gallery-btn');
+  btn.disabled = true;
+  $('gallery-outcome').innerHTML = '';
+  try {
+    await scanGalleries(galleryMinPhotos());
     $('galleries-block').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
-    prog.textContent = '';
     banner('Finding galleries failed: ' + err.message);
   } finally {
     btn.disabled = false;
   }
 });
 
+// ---- gallery editing actions ----------------------------------------------
+
+function toggleGalleryPhoto(btn) {
+  const member = btn.closest('.gal-member');
+  const panel = btn.closest('.gal-panel');
+  if (!member || !panel) return;
+  const idx = Number(panel.dataset.galPanelIdx);
+  const ev = galleryEvents[idx];
+  if (!ev) return;
+  const uuid = member.dataset.uuid;
+  const removed = galleryRemovedSet(ev.key);
+  const out = !removed.has(uuid);
+  if (out) removed.add(uuid); else removed.delete(uuid);
+  const name = member.dataset.name || 'photo';
+  member.classList.toggle('gal-removed', out);
+  btn.textContent = out ? '↺' : '✕';
+  btn.setAttribute('aria-pressed', out ? 'true' : 'false');
+  btn.setAttribute('aria-label', (out ? 'Restore ' : 'Remove ') + name);
+  updateGalleryMeta(idx);
+  updateGalleryBar();
+}
+
+async function declineGallery(idx) {
+  const ev = galleryEvents[idx];
+  if (!ev || galleryDeclined.has(ev.key)) return;
+  try {
+    await api('/api/galleries/decline', { key: ev.key, label: ev.label });
+  } catch (err) {
+    banner('Could not decline that gallery: ' + err.message);
+    return;
+  }
+  galleryDeclined.add(ev.key);
+  galleryChecked.delete(ev.key);
+  if (galleryExpanded === ev.key) galleryExpanded = null;
+  renderGalleries();
+  focusGallery('[data-gal-undecline="' + idx + '"]');
+}
+
+async function undeclineGallery(idx) {
+  const ev = galleryEvents[idx];
+  if (!ev) return;
+  try {
+    await api('/api/galleries/decline', { key: ev.key, undo: true });
+  } catch (err) {
+    banner('Could not undo that decline: ' + err.message);
+    return;
+  }
+  galleryDeclined.delete(ev.key);
+  renderGalleries();
+  focusGallery('[data-gal-decline="' + idx + '"]');
+}
+
 $('gallery-root').addEventListener('click', e => {
+  const undecline = e.target.closest('[data-gal-undecline]');
+  if (undecline) {
+    e.stopPropagation();
+    undeclineGallery(Number(undecline.dataset.galUndecline));
+    return;
+  }
+  const decline = e.target.closest('[data-gal-decline]');
+  if (decline) {
+    e.stopPropagation();
+    declineGallery(Number(decline.dataset.galDecline));
+    return;
+  }
+  const remove = e.target.closest('[data-gal-remove]');
+  if (remove) {
+    e.stopPropagation();
+    toggleGalleryPhoto(remove);
+    return;
+  }
   const act = e.target.closest('[data-gal-action]');
   if (act) {
+    e.stopPropagation();
     const panel = act.closest('.gal-panel');
     const idx = panel ? panel.id.slice('gal-panel-'.length) : '';
     const key = galleryExpanded;
@@ -856,17 +1107,97 @@ $('gallery-root').addEventListener('click', e => {
     }
     return;
   }
+  // The save checkbox and the album field live inside the card; clicking them
+  // must not expand or collapse it.
+  if (e.target.closest(GAL_CONTROL)) return;
   const card = e.target.closest('.gal-card');
   if (card) toggleGallery(Number(card.dataset.galIdx));
 });
 
+$('gallery-root').addEventListener('change', e => {
+  const pick = e.target.closest('[data-gal-pick]');
+  if (!pick) return;
+  e.stopPropagation();
+  const ev = galleryEvents[Number(pick.dataset.galPick)];
+  if (!ev) return;
+  if (pick.checked) galleryChecked.add(ev.key); else galleryChecked.delete(ev.key);
+  updateGalleryBar();
+});
+
+// Album names are stored on every keystroke but never re-rendered mid-typing,
+// so the caret stays where the user put it.
+$('gallery-root').addEventListener('input', e => {
+  const field = e.target.closest('[data-gal-album]');
+  if (!field) return;
+  const ev = galleryEvents[Number(field.dataset.galAlbum)];
+  if (ev) galleryAlbums.set(ev.key, field.value);
+});
+
 $('gallery-root').addEventListener('keydown', e => {
   if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  // Space in the album field must type a space, and Enter/Space on a button
+  // must activate that button -- neither may toggle the card underneath.
+  if (e.target.closest(GAL_CONTROL)) return;
   const card = e.target.closest('.gal-card');
   if (!card) return;
   e.preventDefault();
   toggleGallery(Number(card.dataset.galIdx));
 });
+
+// ---- saving galleries ------------------------------------------------------
+
+$('gallery-save-btn').addEventListener('click', async () => {
+  const picks = gallerySelection();
+  if (!picks.length) return;
+  const btn = $('gallery-save-btn'), status = $('gallery-save-status');
+  const galleries = picks.map(ev => {
+    const removed = galleryRemovedSet(ev.key);
+    const album = String(galleryAlbumValue(ev) || '').trim() || galleryDefaultAlbum(ev);
+    return {
+      key: ev.key,
+      album,
+      uuids: (ev.uuids || []).filter(u => !removed.has(u)),
+      excluded: Array.from(removed)
+    };
+  });
+  btn.disabled = true;
+  status.textContent = 'Saving…';
+  try {
+    const result = await runJob('/api/galleries/create', { galleries },
+      p => { status.textContent = phaseText(p); });
+    status.textContent = '';
+    renderGalleryOutcome(result);
+    refreshStatus();
+    try {
+      await scanGalleries(galleryMinPhotos());
+    } catch (err) {
+      banner('Saved, but refreshing the gallery list failed: ' + err.message);
+    }
+  } catch (err) {
+    status.textContent = '';
+    banner('Saving galleries failed: ' + err.message);
+  } finally {
+    updateGalleryBar();
+  }
+});
+
+function renderGalleryOutcome(result) {
+  const rows = (result && result.results) || [];
+  let html = '<div class="outcome"><strong>Saved.</strong><ul>';
+  if (!rows.length) html += '<li class="muted">No galleries reported.</li>';
+  for (const r of rows) {
+    const bits = [];
+    if (r.filed) bits.push(r.filed + ' filed');
+    if (r.failed) bits.push(r.failed + ' failed');
+    html += '<li><strong>' + esc(r.album || r.key) + '</strong> — ' +
+      (bits.length ? esc(bits.join(' · ')) : 'nothing filed') +
+      (r.error ? '<div class="err">' + esc(r.error) + '</div>' : '') +
+      '</li>';
+  }
+  html += '</ul></div>';
+  $('gallery-outcome').innerHTML = html;
+  $('gallery-outcome').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
 
 // ---- Rules -----------------------------------------------------------------
 
