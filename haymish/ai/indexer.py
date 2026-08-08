@@ -10,6 +10,8 @@ caption could be generated (iCloud-only originals with no local derivative).
 
 from __future__ import annotations
 
+import datetime as dt
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +33,64 @@ CAPTION_PROMPT = (
 )
 
 EMBED_BATCH = 16
+# How many photos to caption before pausing to embed them. Small enough that an
+# interrupted multi-hour run loses little, big enough that embedding overhead
+# stays negligible against captioning cost.
+CHUNK = 32
 _MAX_TEXT_CHARS = 1500  # OCR text can be huge; embeddings don't need all of it
+
+
+class _IndexLog:
+    """Append-only record of index runs at ~/.haymish/index.log.
+
+    Indexing a large library runs for hours, often unattended or in a terminal
+    that gets closed. Without this, a run that dies at hour 12 leaves no trace
+    of how far it got or what went wrong -- and per-photo caption failures are
+    capped at 5 in IndexStats, so the rest would vanish entirely. Logging never
+    raises: a failure to write a log line must not kill an indexing run.
+    """
+
+    def __init__(self, config):
+        from ..paths import APP_DIR
+
+        self.path = APP_DIR / "index.log"
+        self.config = config
+        self._failures = 0
+
+    def _write(self, line: str) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self.path.open("a") as f:
+                f.write(f"{stamp}  {line}\n")
+        except OSError:
+            pass
+
+    def start(self, total: int, workers: int, captions: bool) -> None:
+        self._write(
+            f"START  {total} photo(s) to index · vision={self.config.ai_vision_model if captions else 'off'} "
+            f"· embed={self.config.ai_embed_model} · {workers} caption worker(s)"
+        )
+
+    def chunk(self, done: int, total: int, stats) -> None:
+        self._write(f"  ..    {done}/{total} · captioned={stats.captioned} "
+                     f"embedded={stats.embedded} failed={stats.caption_failed}")
+
+    def failure(self, uuid: str, error) -> None:
+        # Unlike IndexStats.errors (capped at 5 for display), every failure lands
+        # here -- that's the point of a log.
+        self._failures += 1
+        self._write(f"  FAIL  {uuid}: {error}")
+
+    def finish(self, stats, elapsed: float) -> None:
+        self._write(
+            f"DONE   captioned={stats.captioned} embedded={stats.embedded} "
+            f"skipped_no_image={stats.caption_skipped_no_image} failed={stats.caption_failed} "
+            f"already_indexed={stats.already_indexed} in {elapsed / 60:.1f} min"
+        )
+
+    def aborted(self, error) -> None:
+        self._write(f"ABORT  {type(error).__name__}: {error}")
 
 
 @dataclass
@@ -106,6 +165,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     progress(done, total, phase) is called per photo for UI. Caption failures are
     per-photo (logged, photo still gets embedded from OCR/labels); embedding
     failures abort — without the embedding model there's no index to build."""
+    log = _IndexLog(config)
     stats = IndexStats()
     embedded = catalog.embedded_uuids(config.ai_embed_model)
     # Model-scoped: a photo captioned by a DIFFERENT vision model counts as
@@ -129,50 +189,82 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
             )
             captions = False
 
-    if captions:
-        workers = concurrency or recommended_caption_workers()
-        stats.caption_workers = workers
-        needs_caption = [p for p in todo if p.uuid not in captioned]
-        done = 0
+    workers = (concurrency or recommended_caption_workers()) if captions else 1
+    stats.caption_workers = workers
 
-        def caption_one(photo):
-            """Returns (photo, caption_or_None, error_or_None). Runs on a worker
-            thread: does the network call only -- the catalog write happens on
-            the main thread below, keeping sqlite access single-threaded here."""
-            try:
-                return photo, caption_photo(config, photo), None
-            except AIError as e:
-                return photo, None, e
+    def caption_one(photo):
+        """Returns (photo, caption_or_None, error_or_None). Runs on a worker
+        thread: does the network call only -- the catalog write happens on
+        the main thread, keeping sqlite access single-threaded here."""
+        try:
+            return photo, caption_photo(config, photo), None
+        except AIError as e:
+            return photo, None, e
 
-        # Vision inference is the whole cost of indexing and it parallelizes well
-        # on Apple Silicon (measured M4 Max: 5.7 s/photo sequential -> 1.8 s/photo
-        # at 12-way). Workers only do HTTP; results are committed here in order.
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for photo, caption, error in pool.map(caption_one, needs_caption):
-                if error is not None:
-                    stats.caption_failed += 1
-                    if len(stats.errors) < 5:
-                        stats.errors.append(f"caption failed for {photo.uuid}: {error}")
-                elif caption is None:
-                    stats.caption_skipped_no_image += 1
-                else:
-                    catalog.put_caption(photo.uuid, caption, config.ai_vision_model)
-                    stats.captioned += 1
-                done += 1
-                if progress:
-                    progress(done, len(needs_caption), "caption")
+    def embed_chunk(chunk: list, recaptioned: set[str] | None = None) -> None:
+        """Embed and commit a slice, so searchability grows during the run.
 
-    to_embed = [p for p in todo if p.uuid not in embedded]
-    for start in range(0, len(to_embed), EMBED_BATCH):
-        batch = to_embed[start:start + EMBED_BATCH]
+        A photo already embedded gets re-embedded if it just received a caption:
+        its old vector was built from OCR/labels alone, so without this the new
+        caption would never reach the search index. That's the
+        `index --no-captions` (fast pass) then `index` (full pass) workflow --
+        the second run must upgrade the vectors, not skip them.
+        """
+        recaptioned = recaptioned or set()
+        pending = [p for p in chunk if p.uuid not in embedded or p.uuid in recaptioned]
+        if not pending:
+            return
         docs = [build_document(p, catalog.get_caption(p.uuid, config.ai_vision_model))
-                for p in batch]
+                for p in pending]
         vectors = ollama_client.embed(config.ollama_host, config.ai_embed_model, docs)
-        for photo, vector in zip(batch, vectors):
+        for photo, vector in zip(pending, vectors):
             blob, dim = vector_to_blob(vector)
             catalog.put_embedding(photo.uuid, config.ai_embed_model, blob, dim)
+            embedded.add(photo.uuid)
             stats.embedded += 1
-        if progress:
-            progress(min(start + EMBED_BATCH, len(to_embed)), len(to_embed), "embed")
 
+    # Caption and embed in interleaved chunks rather than captioning everything
+    # first. On a large library the caption pass can run many hours, and a
+    # caption without its embedding is useless -- find/ask read embeddings. This
+    # way an interrupted run leaves behind a smaller but fully working index
+    # instead of hours of captions and nothing searchable.
+    log.start(total, workers, captions)
+    started = time.monotonic()
+    done = 0
+    try:
+        for start in range(0, len(todo), CHUNK):
+            chunk = todo[start:start + CHUNK]
+            fresh_captions: set[str] = set()
+            if captions:
+                needs_caption = [p for p in chunk if p.uuid not in captioned]
+                if needs_caption:
+                    # Vision inference is the whole cost here and parallelizes well
+                    # on Apple Silicon (measured M4 Max: 5.7 s/photo sequential vs
+                    # 1.5 s/photo at 4-way). Workers only do HTTP; commits here.
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        for photo, caption, error in pool.map(caption_one, needs_caption):
+                            if error is not None:
+                                stats.caption_failed += 1
+                                log.failure(photo.uuid, error)
+                                if len(stats.errors) < 5:
+                                    stats.errors.append(f"caption failed for {photo.uuid}: {error}")
+                            elif caption is None:
+                                stats.caption_skipped_no_image += 1
+                            else:
+                                catalog.put_caption(photo.uuid, caption, config.ai_vision_model)
+                                fresh_captions.add(photo.uuid)
+                                stats.captioned += 1
+            embed_chunk(chunk, recaptioned=fresh_captions)
+            done += len(chunk)
+            if progress:
+                progress(min(done, total), total, "index")
+            log.chunk(min(done, total), total, stats)
+    except BaseException as e:
+        # Includes KeyboardInterrupt: a Ctrl-C at hour 12 should leave a record of
+        # where it stopped. Everything committed so far is already durable and
+        # fully usable -- captions and their embeddings land together per chunk.
+        log.aborted(e)
+        raise
+
+    log.finish(stats, time.monotonic() - started)
     return stats
