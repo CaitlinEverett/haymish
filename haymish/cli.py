@@ -319,6 +319,9 @@ def packs_show(name):
 @click.option("--min-photos", default=5, show_default=True,
               help="Ignore clusters smaller than this.")
 @click.option("--limit", default=25, show_default=True, help="How many events to show.")
+@click.option("--sort", "sort_by", type=click.Choice(["notable", "date", "photos"]),
+              default="notable", show_default=True,
+              help="notable = biggest/longest/located first; date = chronological.")
 @click.option("--create", "album_prefix", default=None, metavar="PREFIX",
               help='File each event into an album under PREFIX (e.g. "Trips") — '
                    "opens the review UI so you confirm before anything is created.")
@@ -346,8 +349,25 @@ def galleries(gap_hours, max_km, min_photos, limit, album_prefix, no_open):
         console.print("No events found — try a smaller --min-photos or a larger --gap-hours.")
         return
 
+    # Sort before display AND before --create, so "the 25 most notable" is what
+    # gets albums, not the 25 oldest.
+    if sort_by == "notable":
+        events.sort(key=lambda e: e.significance, reverse=True)
+    elif sort_by == "photos":
+        events.sort(key=lambda e: e.photo_count, reverse=True)
+    else:
+        events.sort(key=lambda e: e.start)
+
     console.print(summarize(events, limit=limit))
     console.print(f"\n[dim]{len(events)} event(s) from {len(photos):,} photos.[/dim]")
+    if len(events) > limit * 4:
+        # A big library clusters into hundreds of small day-buckets. Say so, and
+        # say how to get fewer, rather than letting the number look like a bug.
+        console.print(
+            f"[dim]Lots of small clusters — most are single days. For just the big "
+            f"occasions try [bold]--min-photos {max(min_photos * 4, 40)}[/bold], or "
+            f"[bold]--gap-hours 48[/bold] to merge multi-day trips.[/dim]"
+        )
 
     if album_prefix is None:
         console.print('[dim]Add --create "Trips" to file these into albums (with review first).[/dim]')
