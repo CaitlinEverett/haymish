@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Haymish — a calm camera roll</title>
+<meta name="description" content="Haymish is a macOS tool that keeps your Apple Photos camera roll feeling calm: rule-based sweeps, plain-language control, local AI, and deletion that is deliberately hard.">
+<style>
+:root {
+  --paper: #faf6ee;
+  --paper-raised: #ffffff;
+  --paper-sunken: #f2ecdf;
+  --ink: #2b2620;
+  --ink-soft: #5c544a;
+  --ink-faint: #6f6659;
+  --accent: #0e6a5c;
+  --accent-soft: #dcebe4;
+  --accent-ink: #0a4f45;
+  --clay: #9d4a26;
+  --line: #e3dbca;
+  --line-strong: #cfc5ae;
+  --code-bg: #2d2a24;
+  --code-ink: #e9e2d2;
+  --code-accent: #8fd8c5;
+  --serif: "Iowan Old Style", "Palatino Nova", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #211d17;
+    --paper-raised: #2a251e;
+    --paper-sunken: #1a1712;
+    --ink: #ede5d6;
+    --ink-soft: #c2b8a6;
+    --ink-faint: #978d7d;
+    --accent: #63c4ae;
+    --accent-soft: #1e352e;
+    --accent-ink: #8ad8c4;
+    --clay: #de8a5f;
+    --line: #3a342a;
+    --line-strong: #4c453a;
+    --code-bg: #17140f;
+    --code-ink: #ddd5c4;
+    --code-accent: #7fceba;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-family: var(--serif); font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+a { color: var(--accent); }
+a:hover { color: var(--accent-ink); }
+code { font-family: var(--mono); font-size: 0.86em; }
+p code, li code, dd code {
+  background: var(--paper-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.08em 0.35em;
+}
+.wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }
+.narrow { max-width: 44rem; }
+
+/* ---------- Hero ---------- */
+.hero { padding: 5.5rem 0 4rem; text-align: center; }
+.hero h1 {
+  font-size: clamp(3rem, 9vw, 5rem);
+  color: var(--ink);
+}
+.hero h1 .tail { color: var(--accent); }
+.gloss {
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--ink-soft);
+  margin: 0.9rem auto 0;
+  max-width: 34rem;
+  font-size: 1.15rem;
+}
+.hero .what {
+  margin: 1.6rem auto 0;
+  max-width: 38rem;
+  font-size: 1.2rem;
+  color: var(--ink);
+}
+.cta-row {
+  margin-top: 2.2rem;
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--paper);
+  font-weight: 600;
+  text-decoration: none;
+  padding: 0.75rem 1.6rem;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+.btn:hover { background: var(--accent-ink); color: var(--paper); }
+@media (prefers-color-scheme: dark) {
+  .btn { color: #10201b; }
+  .btn:hover { color: #10201b; }
+}
+.hero .free-note { color: var(--ink-faint); font-size: 0.95rem; }
+.install {
+  margin: 2.2rem auto 0;
+  max-width: 34rem;
+  text-align: left;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: 10px;
+  padding: 1.1rem 1.3rem;
+  overflow-x: auto;
+}
+.install code { font-size: 0.9rem; line-height: 1.7; display: block; white-space: pre; }
+.install .c { color: var(--code-accent); opacity: 0.75; }
+.reqs { margin-top: 0.8rem; color: var(--ink-faint); font-size: 0.9rem; }
+
+/* ---------- Sections ---------- */
+section { padding: 4rem 0; }
+section + section { border-top: 1px solid var(--line); }
+.kicker {
+  font-family: var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--clay);
+  margin-bottom: 0.6rem;
+}
+section > .wrap > h2 { font-size: clamp(1.8rem, 4.5vw, 2.5rem); margin-bottom: 0.8rem; }
+.lede { color: var(--ink-soft); max-width: 40rem; margin-bottom: 2.5rem; }
+
+/* ---------- Vignettes ---------- */
+.vignettes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1.5rem;
+}
+.vignette {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-shadow: 0 1px 3px rgba(60, 48, 30, 0.06);
+}
+.vignette h3 { font-size: 1.3rem; }
+.vignette p { color: var(--ink-soft); font-size: 0.97rem; }
+.mock {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-sunken);
+  padding: 0.9rem;
+  font-size: 0.8rem;
+}
+
+/* mock: ask box */
+.mock-ask .promptline {
+  font-family: var(--mono);
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: 7px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.74rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.mock-ask .promptline .dollar { color: var(--code-accent); }
+.mock-ask .plan {
+  margin-top: 0.6rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.35rem 0 0.35rem 0.7rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* mock: review grid */
+.mock-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.45rem; }
+.thumb {
+  aspect-ratio: 1;
+  border-radius: 6px;
+  position: relative;
+  background: linear-gradient(135deg, var(--line) 0%, var(--line-strong) 100%);
+}
+.thumb.t2 { background: linear-gradient(135deg, var(--accent-soft), var(--line)); }
+.thumb.t3 { background: linear-gradient(160deg, var(--line-strong), var(--paper-sunken)); }
+.thumb::after {
+  content: "✓";
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 14px; height: 14px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--paper);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+@media (prefers-color-scheme: dark) { .thumb::after { color: #10201b; } }
+.thumb.unchecked { opacity: 0.55; }
+.thumb.unchecked::after {
+  content: "";
+  background: var(--paper-raised);
+  border: 1.5px solid var(--ink-faint);
+  width: 11px; height: 11px;
+}
+.mock-review .applybar {
+  margin-top: 0.55rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--ink-faint);
+  font-size: 0.72rem;
+}
+.mock-review .applybtn {
+  background: var(--accent);
+  color: var(--paper);
+  border-radius: 5px;
+  padding: 0.15rem 0.6rem;
+  font-weight: 600;
+}
+@media (prefers-color-scheme: dark) { .mock-review .applybtn { color: #10201b; } }
+
+/* mock: ladder */
+.mock-ladder { display: flex; flex-direction: column; gap: 0.4rem; }
+.rung {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+}
+.rung .stage {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-radius: 5px;
+  padding: 0.08rem 0.5rem;
+  min-width: 4.4rem;
+  text-align: center;
+}
+.rung.last .stage { color: var(--clay); background: transparent; border: 1px dashed var(--clay); }
+.rung .when { color: var(--ink-faint); }
+.rung-arrow { color: var(--ink-faint); padding-left: 1.7rem; font-size: 0.7rem; line-height: 0.7; }
+
+/* mock: local AI */
+.mock-local { display: flex; flex-direction: column; gap: 0.5rem; align-items: stretch; }
+.laptop-line {
+  display: flex; align-items: center; gap: 0.55rem;
+  font-size: 0.78rem; color: var(--ink-soft);
+}
+.chip {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  border-radius: 999px;
+  padding: 0.12rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.chip.on { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+.chip.off { text-decoration: line-through; color: var(--ink-soft); }
+
+/* ---------- Safety stepper ---------- */
+.safety { background: var(--paper-sunken); }
+.stepper { list-style: none; counter-reset: gate; margin-top: 2.5rem; }
+.stepper li {
+  counter-increment: gate;
+  position: relative;
+  padding: 0 0 2.2rem 3.6rem;
+}
+.stepper li:last-child { padding-bottom: 0; }
+.stepper li::before {
+  content: counter(gate);
+  position: absolute;
+  left: 0; top: -0.15rem;
+  width: 2.4rem; height: 2.4rem;
+  border-radius: 50%;
+  background: var(--paper-raised);
+  border: 2px solid var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 1.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stepper li::after {
+  content: "";
+  position: absolute;
+  left: calc(1.2rem - 1px);
+  top: 2.5rem;
+  bottom: 0.3rem;
+  width: 2px;
+  background: var(--line-strong);
+}
+.stepper li:last-child::after { display: none; }
+.stepper h3 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+.stepper p { color: var(--ink-soft); max-width: 36rem; font-size: 0.98rem; }
+.safety .coda {
+  margin-top: 2.5rem;
+  padding: 1.1rem 1.4rem;
+  border-left: 4px solid var(--clay);
+  background: var(--paper-raised);
+  border-radius: 0 10px 10px 0;
+  max-width: 40rem;
+  color: var(--ink-soft);
+  font-size: 0.98rem;
+}
+.safety .coda strong { color: var(--ink); }
+
+/* ---------- FAQ ---------- */
+.faq details {
+  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0;
+}
+.faq details:first-of-type { border-top: 1px solid var(--line); }
+.faq summary {
+  cursor: pointer;
+  font-family: var(--serif);
+  font-size: 1.2rem;
+  font-weight: 600;
+  padding: 0.8rem 0.2rem;
+  list-style-position: outside;
+}
+.faq summary:hover { color: var(--accent-ink); }
+.faq details p {
+  padding: 0 0.2rem 1.1rem;
+  color: var(--ink-soft);
+  max-width: 40rem;
+}
+.faq .yesno { font-weight: 700; color: var(--accent-ink); }
+.faq .no { color: var(--clay); }
+
+/* ---------- Footer ---------- */
+footer {
+  border-top: 1px solid var(--line);
+  padding: 2.5rem 0 3rem;
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 0.92rem;
+}
+footer a { color: var(--ink-soft); }
+footer .word { font-family: var(--serif); font-style: italic; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>haym<span class="tail">ish</span></h1>
+    <p class="gloss">Yiddish, from <em>heymish</em> — cozy, unpretentious, at&nbsp;ease. What a camera roll should feel like.</p>
+    <p class="what">A macOS tool that keeps your Apple Photos library calm: rule-based sweeps file the screenshots, selfies, receipts, and screen recordings away — gently, reviewably, and never destructively behind your back.</p>
+    <div class="cta-row">
+      <a class="btn" href="https://github.com/CaitlinEverett/haymish">View on GitHub</a>
+      <span class="free-note">Free &amp; source-available</span>
+    </div>
+    <div class="install" role="figure" aria-label="Install commands">
+      <code><span class="c"># install</span>
+git clone https://github.com/CaitlinEverett/haymish
+cd haymish &amp;&amp; uv sync
+uv run haymish init      <span class="c"># writes ~/.haymish/rules.toml</span>
+uv run haymish doctor    <span class="c"># checks permissions &amp; backends</span></code>
+    </div>
+    <p class="reqs">Requires macOS 13+. AI features need Ollama — see the README on GitHub.</p>
+  </div>
+</header>
+
+<main>
+
+<section id="how-it-feels">
+  <div class="wrap">
+    <p class="kicker">How it feels</p>
+    <h2>Tidy, without the dread</h2>
+    <p class="lede">Haymish works on photos and videos alike. You describe what belongs where; it shows you exactly what it plans to do; you approve. That's the whole loop.</p>
+    <div class="vignettes">
+
+      <article class="vignette">
+        <div class="mock mock-ask" aria-hidden="true">
+          <div class="promptline"><span class="dollar">$</span> haymish ask "file my recipe screenshots into Recipes"</div>
+          <div class="plan">Plan: screenshots matching <em>cooking recipe</em> → album "Recipes".<br>Opening review — nothing happens until you approve.</div>
+        </div>
+        <h3>Ask in plain language</h3>
+        <p>A local LLM turns your request into a rule, prints its interpretation, and opens a review. <code>haymish find "the whiteboard from the conference"</code> searches your library by meaning, read-only. Add <code>--save</code> and a one-off prompt graduates into standing automation.</p>
+      </article>
+
+      <article class="vignette">
+        <div class="mock mock-review" aria-hidden="true">
+          <div class="mock-grid">
+            <div class="thumb"></div><div class="thumb t2"></div><div class="thumb t3 unchecked"></div><div class="thumb"></div>
+            <div class="thumb t3"></div><div class="thumb"></div><div class="thumb t2"></div><div class="thumb unchecked"></div>
+          </div>
+          <div class="applybar"><span>6 of 8 selected</span><span class="applybtn">Apply</span></div>
+        </div>
+        <h3>Review before anything moves</h3>
+        <p>Every action opens a thumbnail review on localhost. Uncheck the false positives — they're remembered and won't resurface — then Apply. The review uses the same code path as <code>sweep --apply</code>, so what you approve is exactly what runs.</p>
+      </article>
+
+      <article class="vignette">
+        <div class="mock mock-ladder" aria-hidden="true">
+          <div class="rung"><span class="stage">file</span><span>into an album, tagged</span><span class="when">immediately</span></div>
+          <div class="rung-arrow">↓</div>
+          <div class="rung"><span class="stage">hide</span><span>off the roll, still yours</span><span class="when">after 14 days</span></div>
+          <div class="rung-arrow">↓</div>
+          <div class="rung"><span class="stage">archive</span><span>checksum-verified backup</span><span class="when">after 60 days</span></div>
+          <div class="rung-arrow">↓</div>
+          <div class="rung last"><span class="stage">delete</span><span>staged, never automatic</span><span class="when">after 90 days</span></div>
+        </div>
+        <h3>A gentle lifecycle, not a purge</h3>
+        <p>Each rule walks an age-gated ladder — file, then hide, then archive, then <em>stage</em> for deletion. Ages count from the photo's own date, so behavior is predictable: "screenshots older than two weeks leave the roll," full stop. Filed and hidden state syncs everywhere via iCloud Photos.</p>
+      </article>
+
+      <article class="vignette">
+        <div class="mock mock-local" aria-hidden="true">
+          <div class="laptop-line"><span class="chip on">your Mac</span><span>captions · embeddings · rule planning</span></div>
+          <div class="laptop-line"><span class="chip off">the cloud</span><span>not involved</span></div>
+          <div class="laptop-line"><span class="chip">Claude API</span><span>strictly opt-in, per rule</span></div>
+        </div>
+        <h3>The AI stays home</h3>
+        <p><code>haymish index</code> builds a caption and embedding for every photo — all on your Mac via Ollama. Your photos never leave the machine. One exception, and only if you ask for it: individual rules can opt in to the Claude API.</p>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section class="safety" id="safety">
+  <div class="wrap">
+    <p class="kicker">The safety model</p>
+    <h2>Deletion is deliberately hard</h2>
+    <p class="lede">This is the identity of the tool, not a footnote. Everything is dry-run by default, every applied action is logged and undoable, and removing a photo for good means passing four gates — in order, every time.</p>
+    <ol class="stepper">
+      <li>
+        <h3>Staged, never automatic</h3>
+        <p>Scheduled sweeps can only <em>stage</em> deletions — they can never remove anything unattended. Plain-language prompts can't even do that: <code>ask</code> plans are stripped to file, tag, and hide, no matter what's requested.</p>
+      </li>
+      <li>
+        <h3>A verified backup copy exists</h3>
+        <p><code>confirm-deletes</code> refuses to proceed unless the original has been archived to your backup volume and the copy is checksum-verified. No backup, no delete.</p>
+      </li>
+      <li>
+        <h3>You confirm, deliberately</h3>
+        <p>You review the staged photos and type your confirmation. Not a default-accept dialog — an explicit, eyes-open yes from you.</p>
+      </li>
+      <li>
+        <h3>macOS asks one more time</h3>
+        <p>The final word belongs to a macOS system dialog that cannot be scripted away. Even then, photos land in Recently Deleted with its 30-day window — one last chance to change your mind.</p>
+      </li>
+    </ol>
+    <p class="coda"><strong>And underneath it all:</strong> the Photos library file is never touched directly. Every write goes through Apple's supported automation APIs, and <code>haymish undo</code> reverses the last sweep's album, keyword, and hide actions.</p>
+  </div>
+</section>
+
+<section class="faq" id="faq">
+  <div class="wrap narrow">
+    <p class="kicker">Honest answers</p>
+    <h2>Questions you should ask</h2>
+    <details>
+      <summary>Is my library safe?</summary>
+      <p><span class="yesno">Yes.</span> Haymish never touches the Photos library file directly — all writes go through Apple's supported automation APIs. Everything is dry-run by default, every applied action is logged, and album, keyword, and hide actions are reversible with <code>haymish undo</code>. Deletion sits behind the four gates above.</p>
+    </details>
+    <details>
+      <summary>Can it delete things by itself?</summary>
+      <p><span class="yesno no">No.</span> Scheduled sweeps only stage deletions. Nothing is removed until you run <code>confirm-deletes</code>, which requires a checksum-verified backup copy, your typed confirmation, and macOS's own system dialog. Prompts can never delete at all.</p>
+    </details>
+    <details>
+      <summary>Where does the AI run?</summary>
+      <p>On your Mac, via Ollama — captions, embeddings, semantic search, and the planner behind <code>ask</code> all run locally. Your photos never leave the machine. The Claude API is available as a strictly per-rule opt-in; nothing uses it unless you say so in <code>rules.toml</code>.</p>
+    </details>
+    <details>
+      <summary>What about my iPhone?</summary>
+      <p>Haymish runs on your Mac, but its actions — albums, keywords, hidden state — sync everywhere through iCloud Photos. Sweep on the Mac; the calm roll shows up on your phone.</p>
+    </details>
+    <details>
+      <summary>Does it handle videos?</summary>
+      <p><span class="yesno">Yes.</span> Rules can target videos and screen recordings directly, the AI index captions each video's poster frame so <code>find</code> and <code>ask</code> see them, and every action — file, hide, archive, delete — works on videos the same as photos.</p>
+    </details>
+    <details>
+      <summary>What does it cost?</summary>
+      <p>Nothing. It's free, and the source is on <a href="https://github.com/CaitlinEverett/haymish">GitHub</a>.</p>
+    </details>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><a href="https://github.com/CaitlinEverett/haymish">github.com/CaitlinEverett/haymish</a></p>
+    <p><span class="word">heymish</span> — may your roll feel that way.</p>
+  </div>
+</footer>
+
+</body>
+</html>

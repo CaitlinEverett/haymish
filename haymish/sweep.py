@@ -324,12 +324,17 @@ def _historically_claimed_uuids(catalog: Catalog, rule_names: set[str]) -> set[s
 
 
 def _rules_for(config: Config, rule_names: list[str] | None,
-                rules_override: list[Rule] | None = None) -> list[Rule]:
+                rules_override: list[Rule] | None = None,
+                catalog: Catalog | None = None) -> list[Rule]:
     """rules_override bypasses rules.toml entirely — used for ephemeral rules built
-    by `haymish ask`/`find`, which still deserve the exact same engine semantics."""
+    by `haymish ask`/`find`, which still deserve the exact same engine semantics.
+    With a catalog, dashboard enable/disable toggles (stored as overrides, so the
+    UI never rewrites rules.toml) take precedence over the toml's own `enabled` —
+    applied here so CLI sweeps and scheduled runs honor them identically."""
     if rules_override is not None:
         return rules_override
-    rules = [r for r in config.rules if r.enabled]
+    toggles = catalog.rule_overrides() if catalog else {}
+    rules = [r for r in config.rules if toggles.get(r.name, r.enabled)]
     if rule_names:
         wanted = set(rule_names)
         rules = [r for r in rules if r.name in wanted]
@@ -372,7 +377,7 @@ def preview_sweep(config: Config, catalog: Catalog, photosdb,
     claimed: dict[str, str] = {}
 
     previews = []
-    for rule in _rules_for(config, rule_names, rules_override):
+    for rule in _rules_for(config, rule_names, rules_override, catalog=catalog):
         if rule.report_only or not (rule.file or rule.hide or rule.archive or rule.delete):
             continue
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
@@ -410,7 +415,7 @@ def run_sweep(config: Config, catalog: Catalog, photosdb, rule_names: list[str] 
     run_id = catalog.start_run("sweep-apply" if apply else "sweep-dry-run")
 
     outcomes: list[RuleOutcome] = []
-    for rule in _rules_for(config, rule_names):
+    for rule in _rules_for(config, rule_names, catalog=catalog):
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
 
         # Honor review rejects here too — otherwise `sweep --apply` (and the

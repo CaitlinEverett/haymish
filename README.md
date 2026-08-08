@@ -80,7 +80,10 @@ works on videos the same as photos.
 
 | Command | What it does |
 |---|---|
-| `review [rule]` | **Preferred.** Localhost thumbnail UI; apply only what you leave checked |
+| `app` | Open the dashboard in your browser (starts the daemon if needed) |
+| `serve` | Run the daemon: dashboard + local API at http://127.0.0.1:8787 |
+| `mcp` | MCP server (stdio) so your AI can drive Haymish — see below |
+| `review [rule]` | Localhost thumbnail UI; apply only what you leave checked |
 | `ask "<request>"` | Plain-language cleanup → generated rule → review UI. `--save NAME` makes it permanent |
 | `find "<query>"` | Semantic search over the AI index; `--album X` files confirmed matches |
 | `index` | Build/refresh the local caption+embedding index behind ask/find/semantic rules |
@@ -93,6 +96,23 @@ works on videos the same as photos.
 | `schedule` | Install a launchd job for periodic sweeps |
 | `menubar` | Menu-bar app: Review Now, Sweep Now, Confirm Deletes |
 | `doctor` | Permission / environment checks |
+
+## The dashboard
+
+`haymish app` opens a local dashboard (menu-bar → "Open Haymish" does the same):
+status at a glance, the ask box, semantic find, the review queue with thumbnails,
+rule toggles, and index refresh — all served from a daemon bound to 127.0.0.1
+with a per-run token. Deletion is never available from the dashboard; staged
+deletes are shown read-only and finalized only via `haymish confirm-deletes`.
+
+## Your AI as a photo librarian (MCP)
+
+`uv sync --extra mcp`, then register with your MCP client (e.g. Claude Code:
+`claude mcp add haymish -- uv run --project /path/to/haymish haymish mcp`).
+Your AI gets tools to check status, search the library semantically, and draft
+cleanup plans — but the contract is strict: **the AI proposes, the human
+disposes.** Plan tools return a review URL; a person opens it, sees thumbnails,
+and clicks Apply. There is no apply tool and no delete tool over MCP.
 
 ## How rules work
 

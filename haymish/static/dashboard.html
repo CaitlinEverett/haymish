@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Haymish</title>
+<style>
+  :root{ --ink:#17191c; --ink-2:#585c5f; --ink-3:#8a8e90; --paper:#f6f6f4; --card:#fff;
+    --line:#dfe1de; --accent:#1f5c56; --accent-tint:#e2eeec;
+    --amber:#8a6100; --amber-tint:#f4e8c8; --green:#2c6b33; --green-tint:#dcecd9;
+    --red:#a13333; --red-tint:#f6dede; }
+  @media (prefers-color-scheme: dark){
+    :root{ --ink:#e9eae7; --ink-2:#b7bab6; --ink-3:#84898a; --paper:#15171a; --card:#1c1f22;
+      --line:#2c3033; --accent:#5fb3a8; --accent-tint:#1d3532;
+      --amber:#e3b859; --amber-tint:#38301c; --green:#8cc98a; --green-tint:#1e3320;
+      --red:#e08a8a; --red-tint:#3a2222; }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--paper); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif; line-height:1.5;}
+  .wrap{max-width:1040px; margin:0 auto; padding:1rem 1.5rem 7rem;}
+
+  /* -- header bar -- */
+  .topbar{display:flex; align-items:center; gap:1rem; flex-wrap:wrap;
+    border-bottom:1px solid var(--line); background:var(--card); padding:.7rem 1.5rem;}
+  .wordmark{font-size:18px; font-weight:600; letter-spacing:.01em;}
+  .chips{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  .chip{display:inline-block; font:inherit; font-size:12.5px; border-radius:999px;
+    padding:2px 11px; border:1px solid var(--line); background:var(--paper); color:var(--ink-2);}
+  .chip.green{background:var(--green-tint); color:var(--green); border-color:transparent;}
+  .chip.amber{background:var(--amber-tint); color:var(--amber); border-color:transparent;}
+  button.chip{cursor:pointer;}
+
+  /* -- banners -- */
+  .banner{display:flex; align-items:baseline; gap:.8rem; background:var(--red-tint); color:var(--red);
+    border:1px solid var(--red); border-radius:8px; padding:.55rem .9rem; margin:.9rem 0 0;
+    font-size:13.5px;}
+  .banner .msg{flex:1; overflow-wrap:anywhere;}
+  .banner .dismiss{background:none; border:none; color:inherit; cursor:pointer; font-size:15px;
+    padding:0; line-height:1;}
+
+  /* -- sections -- */
+  section.block{margin-top:2rem;}
+  h2{font-size:16px; font-weight:500; margin:0 0 .2rem;}
+  .sub{color:var(--ink-2); font-size:13.5px; margin:0 0 .8rem;}
+  .muted{color:var(--ink-3); font-size:12.5px;}
+
+  /* -- ask / find boxes -- */
+  .boxes{display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1.4rem;}
+  @media (max-width:760px){ .boxes{grid-template-columns:1fr;} }
+  .box{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem;}
+  .box.primary{border-color:var(--accent);}
+  .inline-form{display:flex; gap:8px; margin-top:.5rem;}
+  input[type=text]{flex:1; min-width:0; font:inherit; font-size:14px; color:var(--ink);
+    background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:.45rem .7rem;}
+  input[type=text]:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+  button.action{background:var(--accent); color:var(--accent-tint); border:none; border-radius:6px;
+    padding:.45rem 1rem; font:inherit; font-size:14px; font-weight:500; cursor:pointer; white-space:nowrap;}
+  button.action:disabled{opacity:.5; cursor:default;}
+  button.secondary{background:var(--paper); color:var(--accent); border:1px solid var(--line);
+    border-radius:6px; padding:.45rem 1rem; font:inherit; font-size:14px; cursor:pointer; white-space:nowrap;}
+  button.secondary:disabled{opacity:.5; cursor:default;}
+  .progress{font-size:13px; color:var(--ink-2); margin-top:.5rem; min-height:1.2em;}
+
+  /* -- review grid (shared component) -- */
+  .plan-desc{background:var(--accent-tint); color:var(--accent); border-radius:8px;
+    padding:.6rem .9rem; font-size:13.5px; margin:0 0 1.2rem;}
+  .rule-section{margin-bottom:2.2rem;}
+  .rule-header{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+    border-bottom:1px solid var(--line); padding-bottom:.5rem; margin-bottom:1rem;}
+  h3{font-size:15px; font-weight:500; margin:0;}
+  .rule-meta{font-size:12.5px; color:var(--ink-3); margin:2px 0 0;}
+  .rule-actions{display:flex; gap:10px; flex-shrink:0;}
+  .link-btn{background:none; border:none; color:var(--accent); font-size:12.5px; cursor:pointer;
+    padding:0; text-decoration:underline;}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px;}
+  .card{position:relative; display:block; cursor:pointer; border-radius:8px; overflow:hidden;
+    border:1px solid var(--line); background:var(--card);}
+  .card input.pick{position:absolute; top:8px; left:8px; width:18px; height:18px; z-index:2;}
+  .thumb{aspect-ratio:1; background:var(--paper); display:flex; align-items:center; justify-content:center;}
+  .thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+  .no-thumb{color:var(--ink-3); font-size:11px;}
+  .card:has(input.pick:not(:checked)){opacity:.35;}
+  .filename{font-size:11px; color:var(--ink-2); margin:6px 8px 2px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap;}
+  .detail{font-size:10.5px; color:var(--ink-3); margin:0 8px 8px; font-style:italic;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .score{position:absolute; top:8px; right:8px; z-index:2; background:var(--accent);
+    color:var(--accent-tint); font-size:10.5px; border-radius:999px; padding:1px 7px;}
+
+  /* -- apply bar -- */
+  .bar{position:fixed; bottom:0; left:0; right:0; background:var(--card); border-top:1px solid var(--line);
+    padding:.9rem 1.5rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; z-index:5;}
+  .bar .count{font-size:14px; color:var(--ink-2);}
+  .bar .hint{font-size:12px; color:var(--ink-3); flex:1;}
+  .bar .status{font-size:13px; color:var(--ink-2);}
+
+  /* -- outcomes -- */
+  .outcome{background:var(--card); border:1px solid var(--line); border-radius:8px;
+    padding:.8rem 1rem; font-size:13.5px; margin-top:.8rem;}
+  .outcome ul{margin:.3rem 0 0; padding-left:1.2rem;}
+  .outcome .err{color:var(--red);}
+
+  /* -- staged panel -- */
+  .panel{background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:1rem 1.1rem; margin-top:1.4rem;}
+  table{border-collapse:collapse; width:100%; font-size:12.5px; margin-top:.5rem;}
+  th{text-align:left; color:var(--ink-3); font-weight:500; border-bottom:1px solid var(--line);
+    padding:.25rem .6rem .25rem 0;}
+  td{border-bottom:1px solid var(--line); padding:.3rem .6rem .3rem 0; color:var(--ink-2);
+    overflow-wrap:anywhere;}
+  .note{font-size:12.5px; color:var(--amber); background:var(--amber-tint); border-radius:6px;
+    padding:.45rem .8rem; margin-top:.7rem;}
+
+  /* -- rules -- */
+  .rule-row{display:flex; align-items:center; gap:.8rem; padding:.5rem 0;
+    border-bottom:1px solid var(--line);}
+  .rule-row:last-child{border-bottom:none;}
+  .rule-row .rname{font-size:14px;}
+  .rule-row .raction{font-size:12px; color:var(--ink-3); flex:1;}
+  .tag{font-size:10.5px; color:var(--ink-3); border:1px solid var(--line); border-radius:999px;
+    padding:0 7px;}
+  .toggle input{width:16px; height:16px; accent-color:var(--accent);}
+
+  footer{margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+    font-size:12px; color:var(--ink-3);}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px;
+    background:var(--card); border:1px solid var(--line); border-radius:4px; padding:0 4px;}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="wordmark">Haymish</span>
+  <div class="chips">
+    <span class="chip" id="chip-index">Library loading…</span>
+    <button class="chip amber" id="chip-staged" type="button" hidden></button>
+    <span class="chip" id="chip-activity" hidden></span>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="banners"></div>
+
+  <section class="panel" id="staged-panel" hidden>
+    <h2>Staged deletes</h2>
+    <p class="sub">Read-only. Nothing here is deleted until you confirm it in a terminal.</p>
+    <div id="staged-body"></div>
+  </section>
+
+  <div class="boxes">
+    <section class="box primary">
+      <h2>Ask</h2>
+      <p class="sub">Describe a cleanup in plain words — Haymish plans a rule and previews it.</p>
+      <form class="inline-form" id="ask-form">
+        <input type="text" id="ask-input" placeholder="e.g. file my receipts into a Receipts album"
+               autocomplete="off">
+        <button class="action" id="ask-btn" type="submit">Ask</button>
+      </form>
+      <p class="progress" id="ask-progress"></p>
+    </section>
+
+    <section class="box">
+      <h2>Find</h2>
+      <p class="sub">Semantic search over the indexed library.</p>
+      <form class="inline-form" id="find-form">
+        <input type="text" id="find-input" placeholder="e.g. dog on the beach" autocomplete="off">
+        <button class="action" id="find-btn" type="submit">Find</button>
+      </form>
+      <p class="progress" id="find-progress"></p>
+    </section>
+  </div>
+
+  <section class="block" id="find-results-block" hidden>
+    <h2>Find results</h2>
+    <p class="sub" id="find-summary"></p>
+    <form class="inline-form" id="album-form" style="max-width:420px;">
+      <input type="text" id="album-input" placeholder="File into album…" autocomplete="off">
+      <button class="secondary" id="album-btn" type="submit">File into album</button>
+    </form>
+    <div class="grid" id="find-grid" style="margin-top:1rem;"></div>
+  </section>
+
+  <section class="block">
+    <div class="rule-header" style="border:none; padding:0; margin-bottom:.6rem;">
+      <div>
+        <h2>Review</h2>
+        <p class="sub" style="margin:0;">Preview what your enabled rules would do, then apply only what you check.</p>
+      </div>
+      <button class="secondary" id="build-btn" type="button">Build review queue</button>
+    </div>
+    <p class="progress" id="review-progress"></p>
+    <div id="review-root"></div>
+    <div id="apply-outcome"></div>
+  </section>
+
+  <section class="block">
+    <h2>Rules</h2>
+    <p class="sub">Toggling here overrides the rules file until you change it back.</p>
+    <div id="rules-list"><p class="muted">Waiting for status…</p></div>
+  </section>
+
+  <section class="block">
+    <h2>Index</h2>
+    <p class="sub">Embeddings and captions power Ask and Find.</p>
+    <button class="secondary" id="index-btn" type="button">Refresh index</button>
+    <p class="progress" id="index-progress"></p>
+    <div id="index-result"></div>
+  </section>
+
+  <footer>Deletion is never available here — run <code>haymish confirm-deletes</code> in a terminal.</footer>
+</div>
+
+<div class="bar" id="apply-bar" hidden>
+  <span class="count"><span id="sel-count">0</span> selected</span>
+  <span class="hint">Unchecked photos won't be suggested again for that rule.</span>
+  <span class="status" id="apply-status"></span>
+  <button class="action" id="apply-btn" type="button">Apply selected</button>
+</div>
+
+<script>
+'use strict';
+const TOKEN = '__HAYMISH_TOKEN__';
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---- API plumbing ----------------------------------------------------------
+
+async function api(path, body) {
+  const opts = { headers: { 'X-Haymish-Token': TOKEN } };
+  if (body !== undefined) {
+    opts.method = 'POST';
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  let resp;
+  try {
+    resp = await fetch(path, opts);
+  } catch (e) {
+    throw new Error('Could not reach the Haymish daemon — is it still running?');
+  }
+  let data = null;
+  try { data = await resp.json(); } catch (e) { /* non-JSON body */ }
+  if (!resp.ok) {
+    throw new Error((data && data.error) ? data.error : (path + ' failed (HTTP ' + resp.status + ')'));
+  }
+  return data;
+}
+
+// Start a job via POST, then poll /api/jobs/<id> until done/error.
+async function runJob(startPath, body, onProgress) {
+  const started = await api(startPath, body);
+  const jobId = started.job;
+  for (;;) {
+    await sleep(1500);
+    const j = await api('/api/jobs/' + encodeURIComponent(jobId));
+    if (onProgress) onProgress(j.progress || {});
+    if (j.state === 'done') return j.result;
+    if (j.state === 'error') throw new Error(j.error || 'job failed');
+  }
+}
+
+function phaseText(p) {
+  if (!p || !p.phase) return 'working…';
+  if (p.total) return p.phase + ' ' + (p.done || 0) + '/' + p.total;
+  return p.phase + '…';
+}
+
+// ---- error banners (dedupe by key so the 15s poll doesn't stack them) ------
+
+function banner(msg, key) {
+  const holder = $('banners');
+  if (key) {
+    const existing = holder.querySelector('[data-key="' + key + '"] .msg');
+    if (existing) { existing.textContent = msg; return; }
+  }
+  const div = document.createElement('div');
+  div.className = 'banner';
+  div.setAttribute('role', 'alert');
+  if (key) div.dataset.key = key;
+  const span = document.createElement('span');
+  span.className = 'msg';
+  span.textContent = msg;
+  const btn = document.createElement('button');
+  btn.className = 'dismiss';
+  btn.type = 'button';
+  btn.textContent = '✕';
+  btn.setAttribute('aria-label', 'Dismiss');
+  btn.addEventListener('click', () => div.remove());
+  div.append(span, btn);
+  holder.appendChild(div);
+}
+function clearBanner(key) {
+  const el = $('banners').querySelector('[data-key="' + key + '"]');
+  if (el) el.remove();
+}
+
+// ---- status chips ----------------------------------------------------------
+
+function relTime(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (isNaN(d)) return String(ts);
+  const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+
+function renderStatus(s) {
+  const idx = $('chip-index');
+  if (s.index && s.index.total != null) {
+    const covered = s.index.covered || 0, total = s.index.total;
+    idx.textContent = 'Index ' + covered + '/' + total;
+    idx.className = 'chip ' + (covered === total ? 'green' : 'amber');
+  } else if (s.library && s.library.error) {
+    idx.textContent = 'Library failed to load';
+    idx.className = 'chip amber';
+    banner('Photos library failed to load: ' + s.library.error, 'library');
+  } else {
+    idx.textContent = 'Library loading…';
+    idx.className = 'chip';
+  }
+
+  const staged = $('chip-staged');
+  const n = s.staged_deletes || 0;
+  staged.hidden = false;
+  staged.textContent = n + ' staged delete' + (n === 1 ? '' : 's');
+
+  const act = $('chip-activity');
+  const rel = relTime(s.last_action_at);
+  act.hidden = !rel;
+  if (rel) act.textContent = 'last activity ' + rel;
+
+  renderRules(s.rules || []);
+}
+
+async function refreshStatus() {
+  try {
+    renderStatus(await api('/api/status'));
+    clearBanner('status');
+  } catch (e) {
+    banner('Status check failed: ' + e.message, 'status');
+  }
+}
+refreshStatus();
+setInterval(refreshStatus, 15000);
+
+// ---- staged-deletes panel --------------------------------------------------
+
+$('chip-staged').addEventListener('click', async () => {
+  const panel = $('staged-panel');
+  if (!panel.hidden) { panel.hidden = true; return; }
+  try {
+    const data = await api('/api/staged-deletes');
+    const rows = data.staged || [];
+    let html;
+    if (!rows.length) {
+      html = '<p class="muted">Nothing staged for deletion.</p>';
+    } else {
+      html = '<table><tr><th></th><th>Photo</th><th>Rule</th><th>Staged</th><th>Backed up</th></tr>' +
+        rows.map(r =>
+          '<tr><td><img src="/thumb/' + encodeURIComponent(r.uuid) + '" alt="" width="36" height="36" ' +
+          'style="object-fit:cover;border-radius:4px;" onerror="this.remove()"></td>' +
+          '<td>' + esc(r.uuid) + '</td>' +
+          '<td>' + esc(r.rule) + '</td>' +
+          '<td>' + esc(r.staged_at) + '</td>' +
+          '<td>' + (r.backed_up ? 'yes' : 'no') + '</td></tr>').join('') +
+        '</table>';
+    }
+    html += '<p class="note">' + esc(data.note || '') + '</p>';
+    $('staged-body').innerHTML = html;
+    panel.hidden = false;
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) {
+    banner('Could not load staged deletes: ' + e.message);
+  }
+});
+
+// ---- review grid (shared by ask, find-with-album, build) -------------------
+
+let currentSession = null;   // the session payload behind the grid in #review-root
+
+function noThumbTile() { return '<div class="no-thumb">no preview</div>'; }
+
+function renderSession(payload) {
+  currentSession = payload;
+  $('apply-outcome').innerHTML = '';
+  const root = $('review-root');
+
+  let html = '';
+  if (payload.plan && payload.plan.description) {
+    html += '<p class="plan-desc">' + esc(payload.plan.description) + '</p>';
+  }
+  const rules = payload.rules || [];
+  if (!rules.length || rules.every(r => !(r.candidates || []).length)) {
+    root.innerHTML = html + '<p class="muted">Nothing matched.</p>';
+    $('apply-bar').hidden = true;
+    root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+
+  for (const rule of rules) {
+    const cands = rule.candidates || [];
+    if (!cands.length) continue;
+    html += '<section class="rule-section" data-rule="' + esc(rule.name) + '">' +
+      '<div class="rule-header"><div>' +
+      '<h3>' + esc(rule.name) + '</h3>' +
+      '<p class="rule-meta">' + cands.length + ' matched · ' + esc(rule.action) + '</p>' +
+      '</div><div class="rule-actions">' +
+      '<button type="button" class="link-btn" data-action="select-all">select all</button>' +
+      '<button type="button" class="link-btn" data-action="select-none">select none</button>' +
+      '</div></div><div class="grid">';
+    for (const c of cands) {
+      const thumb = c.thumb
+        ? '<img src="/thumb/' + encodeURIComponent(c.uuid) + '" alt="" loading="lazy">'
+        : noThumbTile();
+      html += '<label class="card">' +
+        '<input type="checkbox" class="pick" data-rule="' + esc(rule.name) + '" data-uuid="' +
+        esc(c.uuid) + '" checked>' +
+        '<div class="thumb">' + thumb + '</div>' +
+        '<p class="filename" title="' + esc(c.filename) + (c.date ? ' · ' + esc(c.date) : '') + '">' +
+        esc(c.filename) + '</p>' +
+        (c.detail ? '<p class="detail" title="' + esc(c.detail) + '">' + esc(c.detail) + '</p>' : '') +
+        '</label>';
+    }
+    html += '</div></section>';
+  }
+  root.innerHTML = html;
+  $('apply-status').textContent = '';
+  $('apply-btn').disabled = false;
+  $('apply-bar').hidden = false;
+  updateCount();
+  root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function updateCount() {
+  $('sel-count').textContent = $('review-root').querySelectorAll('.pick:checked').length;
+}
+
+$('review-root').addEventListener('change', e => {
+  if (e.target.classList.contains('pick')) updateCount();
+});
+$('review-root').addEventListener('click', e => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const checked = btn.dataset.action === 'select-all';
+  btn.closest('.rule-section').querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
+  updateCount();
+});
+
+$('apply-btn').addEventListener('click', async () => {
+  if (!currentSession) return;
+  const btn = $('apply-btn'), status = $('apply-status');
+  // Every rule in the session is submitted, so unchecked candidates get recorded
+  // as rejections even when a whole rule is deselected.
+  const selections = {};
+  for (const rule of currentSession.rules || []) selections[rule.name] = [];
+  $('review-root').querySelectorAll('.pick:checked').forEach(cb => {
+    (selections[cb.dataset.rule] = selections[cb.dataset.rule] || []).push(cb.dataset.uuid);
+  });
+  btn.disabled = true;
+  status.textContent = 'Applying…';
+  try {
+    const result = await runJob('/api/apply',
+      { session: currentSession.session, selections },
+      p => { status.textContent = phaseText(p); });
+    status.textContent = '';
+    $('apply-bar').hidden = true;
+    $('review-root').innerHTML = '';
+    currentSession = null;
+    renderApplyOutcome(result);
+    refreshStatus();
+  } catch (e) {
+    status.textContent = '';
+    btn.disabled = false;
+    banner('Apply failed: ' + e.message);
+  }
+});
+
+function renderApplyOutcome(result) {
+  const outcomes = (result && result.outcomes) || [];
+  let html = '<div class="outcome"><strong>Applied.</strong><ul>';
+  if (!outcomes.length) html += '<li class="muted">No outcomes reported.</li>';
+  for (const o of outcomes) {
+    const bits = [];
+    if (o.filed) bits.push(o.filed + ' filed');
+    if (o.hidden) bits.push(o.hidden + ' hidden');
+    if (o.archived) bits.push(o.archived + ' archived');
+    if (o.staged_deletes) bits.push(o.staged_deletes + ' staged for delete');
+    html += '<li><strong>' + esc(o.rule) + '</strong> — ' +
+      (bits.length ? esc(bits.join(' · ')) : 'no actions taken') +
+      ((o.errors && o.errors.length)
+        ? '<div class="err">' + o.errors.map(esc).join('<br>') + '</div>' : '') +
+      '</li>';
+  }
+  html += '</ul></div>';
+  $('apply-outcome').innerHTML = html;
+  $('apply-outcome').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ---- Ask -------------------------------------------------------------------
+
+$('ask-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const request = $('ask-input').value.trim();
+  if (!request) return;
+  const btn = $('ask-btn'), prog = $('ask-progress');
+  btn.disabled = true;
+  prog.textContent = 'starting…';
+  try {
+    const result = await runJob('/api/ask', { request },
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    renderSession(result);
+  } catch (err) {
+    prog.textContent = '';
+    banner('Ask failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Find ------------------------------------------------------------------
+
+let lastFindQuery = '';
+
+$('find-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const query = $('find-input').value.trim();
+  if (!query) return;
+  const btn = $('find-btn'), prog = $('find-progress');
+  btn.disabled = true;
+  prog.textContent = 'searching…';
+  try {
+    const result = await runJob('/api/find', { query, top: 24 },
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    lastFindQuery = query;
+    renderFindResults(query, result);
+  } catch (err) {
+    prog.textContent = '';
+    banner('Find failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderFindResults(query, result) {
+  const matches = (result && result.matches) || [];
+  $('find-summary').textContent = matches.length
+    ? matches.length + ' match' + (matches.length === 1 ? '' : 'es') + ' for “' + query +
+      '” (searched ' + (result.indexed || 0) + ' indexed photos)'
+    : 'No matches for “' + query + '”.';
+  $('find-grid').innerHTML = matches.map(m =>
+    '<div class="card" title="' + esc(m.caption || '') + '">' +
+    '<span class="score">' + esc(m.score) + '</span>' +
+    '<div class="thumb"><img src="/thumb/' + encodeURIComponent(m.uuid) + '" alt="" loading="lazy" ' +
+    'onerror="this.parentNode.innerHTML=\'<div class=&quot;no-thumb&quot;>no preview</div>\'"></div>' +
+    '<p class="filename" title="' + esc(m.filename) + '">' + esc(m.filename) + '</p>' +
+    (m.date ? '<p class="detail">' + esc(m.date) + '</p>' : '') +
+    '</div>').join('');
+  $('find-results-block').hidden = false;
+  $('find-results-block').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+$('album-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const album = $('album-input').value.trim();
+  if (!album || !lastFindQuery) return;
+  const btn = $('album-btn'), prog = $('find-progress');
+  btn.disabled = true;
+  prog.textContent = 'building preview…';
+  try {
+    const result = await runJob('/api/find', { query: lastFindQuery, top: 24, album },
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    renderSession(result);   // find-with-album returns a session payload
+  } catch (err) {
+    prog.textContent = '';
+    banner('File-into-album failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Build review queue ----------------------------------------------------
+
+$('build-btn').addEventListener('click', async () => {
+  const btn = $('build-btn'), prog = $('review-progress');
+  btn.disabled = true;
+  prog.textContent = 'starting…';
+  try {
+    const result = await runJob('/api/review/build', {},
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    renderSession(result);
+  } catch (err) {
+    prog.textContent = '';
+    banner('Review build failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Rules -----------------------------------------------------------------
+
+function renderRules(rules) {
+  const holder = $('rules-list');
+  if (!rules.length) {
+    holder.innerHTML = '<p class="muted">No rules configured.</p>';
+    return;
+  }
+  holder.innerHTML = rules.map(r =>
+    '<div class="rule-row">' +
+    '<label class="toggle"><input type="checkbox" data-rule="' + esc(r.name) + '"' +
+    (r.enabled ? ' checked' : '') + (r.report_only ? ' disabled' : '') + '></label>' +
+    '<span class="rname">' + esc(r.name) + '</span>' +
+    (r.overridden ? '<span class="tag">overridden</span>' : '') +
+    (r.report_only ? '<span class="tag">report only</span>' : '') +
+    '<span class="raction">' + esc(r.action) + '</span>' +
+    '</div>').join('');
+}
+
+$('rules-list').addEventListener('change', async e => {
+  const cb = e.target;
+  if (!cb.matches('input[data-rule]')) return;
+  try {
+    await api('/api/rules/toggle', { rule: cb.dataset.rule, enabled: cb.checked });
+    refreshStatus();
+  } catch (err) {
+    cb.checked = !cb.checked;
+    banner('Could not toggle rule: ' + err.message);
+  }
+});
+
+// ---- Index -----------------------------------------------------------------
+
+$('index-btn').addEventListener('click', async () => {
+  const btn = $('index-btn'), prog = $('index-progress');
+  btn.disabled = true;
+  prog.textContent = 'starting…';
+  $('index-result').innerHTML = '';
+  try {
+    const r = await runJob('/api/index/build', { captions: true },
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    const bits = [];
+    if (r.embedded) bits.push(r.embedded + ' embedded');
+    if (r.captioned) bits.push(r.captioned + ' captioned');
+    if (r.already_indexed) bits.push(r.already_indexed + ' already up to date');
+    if (!bits.length) bits.push('already up to date');
+    const errs = r.errors || [];
+    $('index-result').innerHTML = '<div class="outcome">' +
+      esc(bits.join(' · ')) +
+      (errs.length ? '<ul>' + errs.map(x => '<li class="err">' + esc(x) + '</li>').join('') + '</ul>' : '') +
+      '</div>';
+    refreshStatus();
+  } catch (err) {
+    prog.textContent = '';
+    banner('Index build failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

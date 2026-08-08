@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS embeddings(
   uuid TEXT NOT NULL, model TEXT NOT NULL, dim INTEGER, vector BLOB, computed_at TEXT,
   PRIMARY KEY(uuid, model)
 );
+CREATE TABLE IF NOT EXISTS rule_overrides(
+  rule TEXT PRIMARY KEY, enabled INTEGER, updated_at TEXT
+);
 """
 
 
@@ -68,11 +71,13 @@ class Catalog:
         ensure_app_dirs()
         # check_same_thread=False: `haymish review`'s local HTTP server handles its
         # one /apply POST on a server-spawned thread, not whichever thread created
-        # this Catalog. Every other caller in this codebase is single-threaded, and
-        # review.py's server only ever has one live request touching the catalog at
-        # a time (GET / and GET /thumb/ never read it), so this is safe in practice
-        # without adding a lock.
+        # this Catalog. The daemon (`haymish serve`) additionally creates a separate
+        # Catalog PER JOB THREAD, so cross-thread sharing of one connection stays
+        # limited to the review server's single-request pattern. busy_timeout covers
+        # the daemon's multi-connection case: writers wait instead of failing with
+        # "database is locked" when two jobs commit at once.
         self.db = sqlite3.connect(path or CATALOG_PATH, check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
 
     def close(self):
@@ -260,3 +265,20 @@ class Catalog:
         return self.db.execute(
             "SELECT uuid, vector, dim FROM embeddings WHERE model=?", (model,)
         ).fetchall()
+
+    # -- rule overrides (dashboard enable/disable toggles) ---------------------
+    # Stored here rather than rewritten into rules.toml so user comments and
+    # formatting in that file are never touched by the UI.
+    def set_rule_override(self, rule: str, enabled: bool):
+        self.db.execute(
+            "INSERT OR REPLACE INTO rule_overrides VALUES(?,?,?)", (rule, int(enabled), _now())
+        )
+        self.db.commit()
+
+    def clear_rule_override(self, rule: str):
+        self.db.execute("DELETE FROM rule_overrides WHERE rule=?", (rule,))
+        self.db.commit()
+
+    def rule_overrides(self) -> dict[str, bool]:
+        rows = self.db.execute("SELECT rule, enabled FROM rule_overrides").fetchall()
+        return {r[0]: bool(r[1]) for r in rows}

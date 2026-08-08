@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 claude = ["anthropic>=0.40"]
 dev = ["pytest>=8"]
+mcp = ["mcp>=1.2"]
 
 [project.scripts]
 haymish = "haymish.cli:main"

@@ -711,5 +711,50 @@ def menubar():
     menubar_main()
 
 
+@main.command()
+@click.option("--port", default=None, type=int,
+              help="Port to bind (default 8787; falls back to a free port if taken).")
+def serve(port):
+    """Run the Haymish daemon: dashboard at http://127.0.0.1:8787 plus the API the
+    menu bar and MCP server use. Binds localhost only; mutations require the
+    per-run token and always go through the browser review. No delete endpoint."""
+    from .server import DEFAULT_PORT, serve as run_serve
+
+    config = _load_config()
+    console.print(f"[green]Haymish daemon starting[/green] — dashboard will be at "
+                  f"http://127.0.0.1:{port or DEFAULT_PORT} (Ctrl-C to stop)")
+    run_serve(config, port=port or DEFAULT_PORT)
+
+
+@main.command()
+def app():
+    """Open the Haymish dashboard in your browser, starting the daemon if needed."""
+    import subprocess
+
+    from .server import ensure_daemon
+
+    _load_config()  # fail fast with a good message if rules.toml is missing/broken
+    with console.status("Starting Haymish…"):
+        try:
+            url, _token = ensure_daemon()
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+    console.print(f"Dashboard: [bold]{url}/[/bold]")
+    subprocess.run(["open", f"{url}/"], check=False)
+
+
+@main.command()
+def mcp():
+    """Run the MCP server (stdio) so your AI can drive Haymish — read-only tools
+    plus proposals that a human confirms in the browser review. Never deletes."""
+    try:
+        from .mcp_server import main as mcp_main
+    except ImportError:
+        console.print("[red]The mcp extra isn't installed — run `uv sync --extra mcp`.[/red]")
+        sys.exit(1)
+    mcp_main()
+
+
 if __name__ == "__main__":
     main()

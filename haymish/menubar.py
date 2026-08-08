@@ -91,6 +91,7 @@ class HaymishMenuBarApp(rumps.App):
         self.menu = [
             self.status_item,
             None,
+            "Open Haymish",
             "Review Now",
             "Sweep Now (no review)",
             self.confirm_deletes_item,
@@ -113,6 +114,13 @@ class HaymishMenuBarApp(rumps.App):
 
     def _on_staged_deletes_timer(self, _timer):
         self.refresh_staged_deletes_count()
+
+    @rumps.clicked("Open Haymish")
+    def open_haymish(self, sender):
+        # `haymish app` handles daemon startup + browser open; run detached so a
+        # slow first library load never blocks the menu bar's run loop.
+        subprocess.Popen(["haymish", "app"], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, start_new_session=True)
 
     @rumps.clicked("Review Now")
     def review_now(self, _sender):
