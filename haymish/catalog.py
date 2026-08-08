@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS embeddings(
 CREATE TABLE IF NOT EXISTS rule_overrides(
   rule TEXT PRIMARY KEY, enabled INTEGER, updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS declined_galleries(
+  key TEXT PRIMARY KEY, label TEXT, declined_at TEXT
+);
+CREATE TABLE IF NOT EXISTS gallery_names(
+  key TEXT PRIMARY KEY, album TEXT, saved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS gallery_excluded(
+  key TEXT NOT NULL, uuid TEXT NOT NULL, excluded_at TEXT,
+  PRIMARY KEY(key, uuid)
+);
 """
 
 
@@ -348,3 +358,54 @@ class Catalog:
     def rule_overrides(self) -> dict[str, bool]:
         rows = self.db.execute("SELECT rule, enabled FROM rule_overrides").fetchall()
         return {r[0]: bool(r[1]) for r in rows}
+
+    # -- galleries -------------------------------------------------------------
+    # Galleries are recomputed from scratch every run (they're derived from photo
+    # timestamps and locations, not stored), so every human judgment about them
+    # -- "not a real event", "call it this", "not that photo" -- has to persist
+    # here or it's lost the moment you click again.
+    def decline_gallery(self, key: str, label: str = ""):
+        self.db.execute(
+            "INSERT OR REPLACE INTO declined_galleries VALUES(?,?,?)", (key, label, _now())
+        )
+        self.db.commit()
+
+    def undecline_gallery(self, key: str):
+        self.db.execute("DELETE FROM declined_galleries WHERE key=?", (key,))
+        self.db.commit()
+
+    def declined_galleries(self) -> dict[str, str]:
+        rows = self.db.execute("SELECT key, label FROM declined_galleries").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def set_gallery_name(self, key: str, album: str):
+        """Remember the album name chosen for a gallery, so re-running keeps
+        filing into the album the user named rather than minting a new one from
+        a regenerated label."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO gallery_names VALUES(?,?,?)", (key, album, _now())
+        )
+        self.db.commit()
+
+    def gallery_names(self) -> dict[str, str]:
+        rows = self.db.execute("SELECT key, album FROM gallery_names").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def exclude_from_gallery(self, key: str, uuids: list[str]):
+        for uuid in uuids:
+            self.db.execute(
+                "INSERT OR REPLACE INTO gallery_excluded VALUES(?,?,?)", (key, uuid, _now())
+            )
+        self.db.commit()
+
+    def gallery_exclusions(self, key: str | None = None) -> dict[str, set[str]]:
+        if key is not None:
+            rows = self.db.execute(
+                "SELECT key, uuid FROM gallery_excluded WHERE key=?", (key,)
+            ).fetchall()
+        else:
+            rows = self.db.execute("SELECT key, uuid FROM gallery_excluded").fetchall()
+        out: dict[str, set[str]] = {}
+        for k, uuid in rows:
+            out.setdefault(k, set()).add(uuid)
+        return out

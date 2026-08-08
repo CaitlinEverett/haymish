@@ -475,6 +475,25 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
                 job.progress = {"phase": "clustering"}
                 events = cluster_events(photos, max_gap_hours=gap_hours,
                                          max_km=max_km, min_photos=min_photos)
+
+                # Apply remembered human judgments: galleries you rejected stay
+                # gone, names you chose stick, photos you pulled out stay out.
+                catalog = Catalog()
+                try:
+                    declined = catalog.declined_galleries()
+                    chosen_names = catalog.gallery_names()
+                    exclusions = catalog.gallery_exclusions()
+                finally:
+                    catalog.close()
+
+                events = [e for e in events if e.key not in declined]
+                for e in events:
+                    dropped = exclusions.get(e.key)
+                    if dropped:
+                        e.uuids = [u for u in e.uuids if u not in dropped]
+                        e.photo_count = len(e.uuids)
+                events = [e for e in events if e.photo_count]
+
                 events.sort(key=lambda e: e.significance, reverse=True)
                 events = events[:limit]
 
@@ -493,11 +512,82 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
                         "start": e.start.isoformat(), "end": e.end.isoformat(),
                         "cover": cover.uuid if cover is not None else None,
                         "uuids": e.uuids,
+                        # The name last chosen for this gallery, so the field is
+                        # pre-filled with the user's wording rather than the
+                        # regenerated label.
+                        "album": chosen_names.get(e.key, ""),
+                        "excluded": sorted(exclusions.get(e.key, ())),
                     })
                     job.progress = {"phase": "covers", "done": i + 1, "total": len(events)}
                 return {"events": out, "total_events": len(events)}
 
             job = state.start_job("galleries", run)
+            self._json({"job": job.id})
+
+        elif path == "/api/galleries/decline":
+            # "Don't suggest this again." Galleries are recomputed every run, so
+            # without persisting this the same rejected grouping returns forever.
+            key = body.get("key")
+            if not key:
+                self._json({"error": "key required"}, 400)
+                return
+            catalog = Catalog()
+            try:
+                if body.get("undo"):
+                    catalog.undecline_gallery(key)
+                else:
+                    catalog.decline_gallery(key, body.get("label", ""))
+            finally:
+                catalog.close()
+            self._json({"key": key, "declined": not body.get("undo")})
+
+        elif path == "/api/galleries/create":
+            # Explicit and literal: the client sends exactly which galleries,
+            # under exactly which names, containing exactly which photos. No
+            # inference here -- the human already made every one of those calls
+            # in the UI, and this endpoint's job is to carry them out faithfully.
+            wanted = body.get("galleries") or []
+            if not wanted:
+                self._json({"error": "no galleries selected"}, 400)
+                return
+
+            def run(job: Job):
+                from .actions import albums as album_action
+
+                catalog = Catalog()
+                run_id = catalog.start_run("galleries-create")
+                results = []
+                try:
+                    for i, g in enumerate(wanted):
+                        key = g.get("key") or ""
+                        album = (g.get("album") or "").strip()
+                        uuids = list(g.get("uuids") or [])
+                        if not album or not uuids:
+                            results.append({"key": key, "album": album, "filed": 0,
+                                             "error": "needs an album name and photos"})
+                            continue
+
+                        # Anything the user removed from the gallery is recorded,
+                        # so it stays out when this gallery is computed again.
+                        dropped = [u for u in (g.get("excluded") or []) if u]
+                        if dropped:
+                            catalog.exclude_from_gallery(key, dropped)
+                        catalog.set_gallery_name(key, album)
+
+                        n, failed = album_action.add_to_album(uuids, album)
+                        for u in (u for u in uuids if u not in failed):
+                            catalog.log_action(run_id, f"gallery:{key}", u,
+                                                "album", {"album": album})
+                        results.append({"key": key, "album": album, "filed": n,
+                                         "failed": len(failed)})
+                        job.progress = {"phase": "filing", "done": i + 1,
+                                        "total": len(wanted)}
+                    catalog.finish_run(run_id, {"galleries": len(wanted)})
+                finally:
+                    catalog.close()
+                return {"run_id": run_id, "results": results}
+
+            job = state.start_job("galleries-create", run)
             self._json({"job": job.id})
 
         elif path == "/api/gallery/thumbs":
