@@ -115,8 +115,51 @@ def _apply_classify(rule: Rule, candidates: list, config: Config, catalog: Catal
                                  verdict, confidence, detail)
         if verdict and confidence >= threshold:
             kept.append(photo)
-            if detail_out is not None:
+            # Don't clobber an earlier stage's detail (e.g. the semantic score)
+            # with an empty classify rationale.
+            if detail_out is not None and detail:
                 detail_out[photo.uuid] = detail
+    return kept
+
+
+def _apply_semantic(rule: Rule, candidates: list, config: Config, catalog: Catalog,
+                     outcome: RuleOutcome, detail_out: dict[str, str] | None = None) -> list:
+    """Embedding-similarity filter against the AI index (`haymish index`). Sits
+    between the cheap query flags and the expensive per-photo classify: free-ish
+    (one query embedding + cosine over cached vectors), so it's the right tool for
+    "photos of X" selection and as a pre-filter that keeps classify affordable."""
+    if not rule.semantic:
+        return candidates
+    from .ai.ollama_client import AIError
+    from .ai.search import semantic_scores
+
+    try:
+        scores = semantic_scores(config, catalog, rule.semantic["query"])
+    except AIError as e:
+        outcome.action_errors.append(f"semantic filter unavailable ({e}) — rule matched nothing")
+        return []
+    if not scores:
+        outcome.action_errors.append(
+            "semantic filter: no photos indexed yet — run `haymish index` first"
+        )
+        return []
+
+    unindexed = sum(1 for p in candidates if p.uuid not in scores)
+    if unindexed:
+        outcome.action_errors.append(
+            f"{unindexed} candidate(s) missing from the AI index (run `haymish index`) — "
+            f"they can't match this rule until indexed"
+        )
+
+    min_score = float(rule.semantic.get("min_score", 0.35))
+    kept = [p for p in candidates if scores.get(p.uuid, 0.0) >= min_score]
+    kept.sort(key=lambda p: scores[p.uuid], reverse=True)
+    top = rule.semantic.get("top")
+    if top:
+        kept = kept[:int(top)]
+    if detail_out is not None:
+        for p in kept:
+            detail_out[p.uuid] = f"semantic match {scores[p.uuid]:.2f}"
     return kept
 
 
@@ -280,7 +323,12 @@ def _historically_claimed_uuids(catalog: Catalog, rule_names: set[str]) -> set[s
     return {a["uuid"] for a in actions if a["rule"] in rule_names}
 
 
-def _rules_for(config: Config, rule_names: list[str] | None) -> list[Rule]:
+def _rules_for(config: Config, rule_names: list[str] | None,
+                rules_override: list[Rule] | None = None) -> list[Rule]:
+    """rules_override bypasses rules.toml entirely — used for ephemeral rules built
+    by `haymish ask`/`find`, which still deserve the exact same engine semantics."""
+    if rules_override is not None:
+        return rules_override
     rules = [r for r in config.rules if r.enabled]
     if rule_names:
         wanted = set(rule_names)
@@ -303,6 +351,7 @@ def _select_and_classify(rule: Rule, photos: list, by_uuid: dict, now, config: C
                       if claimed.get(p.uuid) not in excluded and p.uuid not in historical]
     if extra_exclude:
         candidates = [p for p in candidates if p.uuid not in extra_exclude]
+    candidates = _apply_semantic(rule, candidates, config, catalog, outcome, detail_out=detail_out)
     candidates = _apply_classify(rule, candidates, config, catalog, outcome, detail_out=detail_out)
     for p in candidates:
         claimed.setdefault(p.uuid, rule.name)
@@ -310,18 +359,20 @@ def _select_and_classify(rule: Rule, photos: list, by_uuid: dict, now, config: C
 
 
 def preview_sweep(config: Config, catalog: Catalog, photosdb,
-                   rule_names: list[str] | None = None) -> list[RulePreview]:
-    """The query -> exclude -> classify phase only, with per-photo detail, for the
-    `haymish review` browser UI to render before anything is actually applied.
-    Report-only rules (nothing to confirm -- they never act) and rules with no
-    lifecycle stage at all are skipped; `scan` already covers pure reporting."""
+                   rule_names: list[str] | None = None,
+                   rules_override: list[Rule] | None = None) -> list[RulePreview]:
+    """The query -> exclude -> semantic -> classify phase only, with per-photo
+    detail, for the `haymish review` browser UI to render before anything is
+    actually applied. Report-only rules (nothing to confirm -- they never act) and
+    rules with no lifecycle stage at all are skipped; `scan` covers pure reporting.
+    rules_override runs ephemeral rules (from `ask`/`find`) instead of rules.toml."""
     photos = library.all_photos(photosdb)
     by_uuid = {p.uuid: p for p in photos}
     now = dt.datetime.now(dt.timezone.utc)
     claimed: dict[str, str] = {}
 
     previews = []
-    for rule in _rules_for(config, rule_names):
+    for rule in _rules_for(config, rule_names, rules_override):
         if rule.report_only or not (rule.file or rule.hide or rule.archive or rule.delete):
             continue
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)

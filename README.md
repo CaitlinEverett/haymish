@@ -40,11 +40,45 @@ no separate apply path that can drift.
 Archive/delete stages need `[global].backup` set in `~/.haymish/rules.toml` (USB
 stick path is fine). File + hide work without it.
 
+## Prompts: ask, find, and semantic rules
+
+Build the AI index once (a caption + embedding per photo, all local via Ollama —
+nothing leaves your Mac), then drive cleanup in plain language:
+
+```sh
+uv run haymish index                                       # one-time-ish; incremental after
+uv run haymish find "the whiteboard from the conference"   # semantic search, read-only
+uv run haymish find "receipts from this spring" --album "Expenses"   # file via review UI
+uv run haymish ask "put my recipe screenshots in a Recipes album"
+uv run haymish ask "hide selfies older than a week" --save hide-old-selfies
+```
+
+`ask` compiles the request into a rule with a local LLM, prints its interpretation,
+and opens the same thumbnail review — nothing happens until you approve. `--save`
+writes the generated rule into `rules.toml` so it runs in every future sweep:
+one-off prompts graduate into standing automation.
+
+Rules can also match by content directly:
+
+```toml
+[rule.recipes]
+query = { screenshot = true }
+semantic = { query = "cooking recipe with ingredients or instructions", min_score = 0.35 }
+file = { album = "Recipes" }
+```
+
+**Prompts can never delete.** `ask` plans are stripped to file/tag/hide no matter
+what's requested; archive and delete stay in `rules.toml` plus the staged
+`confirm-deletes` flow.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `review [rule]` | **Preferred.** Localhost thumbnail UI; apply only what you leave checked |
+| `ask "<request>"` | Plain-language cleanup → generated rule → review UI. `--save NAME` makes it permanent |
+| `find "<query>"` | Semantic search over the AI index; `--album X` files confirmed matches |
+| `index` | Build/refresh the local caption+embedding index behind ask/find/semantic rules |
 | `scan` | Read-only inventory + report: screenshots by age, selfies, receipt/message candidates, duplicates, junk-score calibration, people-tag hygiene |
 | `sweep [rule]` | Run rules from `rules.toml`. **Dry-run by default**; `--apply` to act blindly |
 | `confirm-deletes` | Review staged deletions; requires verified backup copies; macOS shows its own final confirmation dialog |
@@ -57,9 +91,11 @@ stick path is fine). File + hide work without it.
 
 ## How rules work
 
-Each rule in `~/.haymish/rules.toml` has a query, an optional classifier
-(Apple's on-device signals free; local Ollama vision model by default; Claude API
-opt-in per rule), and an age-gated lifecycle ladder:
+Each rule in `~/.haymish/rules.toml` selects photos through up to three tiers —
+cheap metadata query flags, a `semantic` embedding match against the AI index,
+and a per-photo vision `classify` check (Apple's on-device signals free; local
+Ollama model by default; Claude API opt-in per rule) — then walks an age-gated
+lifecycle ladder:
 
 ```
 file (album/keyword, immediate) → hide (off the roll) → archive (backup copy) → delete (staged)

@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS review_rejected(
   uuid TEXT NOT NULL, rule TEXT NOT NULL, rejected_at TEXT,
   PRIMARY KEY(uuid, rule)
 );
+CREATE TABLE IF NOT EXISTS captions(
+  uuid TEXT PRIMARY KEY, caption TEXT, model TEXT, computed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS embeddings(
+  uuid TEXT NOT NULL, model TEXT NOT NULL, dim INTEGER, vector BLOB, computed_at TEXT,
+  PRIMARY KEY(uuid, model)
+);
 """
 
 
@@ -223,3 +230,33 @@ class Catalog:
             "SELECT uuid FROM review_rejected WHERE rule=?", (rule,)
         ).fetchall()
         return {r[0] for r in rows}
+
+    # -- AI index (captions + embeddings) --------------------------------------
+    def get_caption(self, uuid: str) -> str | None:
+        row = self.db.execute("SELECT caption FROM captions WHERE uuid=?", (uuid,)).fetchone()
+        return row[0] if row else None
+
+    def put_caption(self, uuid: str, caption: str, model: str):
+        self.db.execute(
+            "INSERT OR REPLACE INTO captions VALUES(?,?,?,?)", (uuid, caption, model, _now())
+        )
+        self.db.commit()
+
+    def captioned_uuids(self) -> set[str]:
+        return {r[0] for r in self.db.execute("SELECT uuid FROM captions").fetchall()}
+
+    def put_embedding(self, uuid: str, model: str, vector: bytes, dim: int):
+        self.db.execute(
+            "INSERT OR REPLACE INTO embeddings VALUES(?,?,?,?,?)",
+            (uuid, model, dim, vector, _now()),
+        )
+        self.db.commit()
+
+    def embedded_uuids(self, model: str) -> set[str]:
+        rows = self.db.execute("SELECT uuid FROM embeddings WHERE model=?", (model,)).fetchall()
+        return {r[0] for r in rows}
+
+    def all_embeddings(self, model: str) -> list[tuple[str, bytes, int]]:
+        return self.db.execute(
+            "SELECT uuid, vector, dim FROM embeddings WHERE model=?", (model,)
+        ).fetchall()

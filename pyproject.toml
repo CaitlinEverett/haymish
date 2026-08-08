@@ -14,6 +14,7 @@ dependencies = [
     "rich>=13",
     "httpx>=0.27",
     "imagehash>=4.3",
+    "numpy>=1.26",
     "pillow>=10",
     "rumps>=0.4",
 ]

@@ -218,6 +218,212 @@ def review(rule, no_open):
     _print_sweep_report(report, apply_=True)
 
 
+@main.command()
+@click.option("--no-captions", is_flag=True,
+              help="Skip vision-LLM captions; index only Photos' own OCR text and labels (much faster).")
+@click.option("--limit", type=int, default=None,
+              help="Index at most N un-indexed photos this run (useful for a first taste).")
+def index(no_captions, limit):
+    """Build the AI index: a caption + embedding per photo, cached locally.
+
+    Powers `haymish find`, `haymish ask`, and `semantic = {…}` rules. Incremental —
+    re-running only processes new photos. Everything stays on this Mac.
+    """
+    from .ai.indexer import index_photos
+    from .ai.ollama_client import AIError
+    from .catalog import Catalog
+    from .library import all_photos, load_photosdb
+
+    config = _load_config()
+    catalog = Catalog()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+        photos = [p for p in all_photos(photosdb) if not getattr(p, "ismovie", False)]
+
+    from rich.progress import Progress
+
+    with Progress(console=console) as prog:
+        tasks: dict = {}
+
+        def on_progress(done, total, phase):
+            if phase not in tasks:
+                label = "Captioning" if phase == "caption" else "Embedding"
+                tasks[phase] = prog.add_task(label, total=total)
+            prog.update(tasks[phase], completed=done)
+
+        try:
+            stats = index_photos(config, catalog, photos, captions=not no_captions,
+                                  limit=limit, progress=on_progress)
+        except AIError as e:
+            console.print(f"[red]{e}[/red]")
+            catalog.close()
+            sys.exit(1)
+
+    catalog.close()
+    console.print(
+        f"Indexed [bold]{stats.embedded}[/bold] photo(s) "
+        f"({stats.captioned} captioned, {stats.caption_skipped_no_image} without a local image, "
+        f"{stats.caption_failed} caption failures); {stats.already_indexed} already up to date."
+    )
+    for err in stats.errors:
+        console.print(f"  [yellow]{err}[/yellow]")
+
+
+@main.command()
+@click.argument("query")
+@click.option("--top", "top_k", default=20, show_default=True, help="How many matches to show.")
+@click.option("--album", "album_name", default=None,
+              help="Open the review UI to file confirmed matches into this album.")
+@click.option("--no-open", is_flag=True, help="With --album: print the review URL but don't open it.")
+def find(query, top_k, album_name, no_open):
+    """Semantic search over the AI index — e.g. `haymish find "whiteboard from the conference"`.
+
+    Read-only by default. With --album, matches open in the review UI so you
+    confirm exactly which ones get filed.
+    """
+    from .ai.ollama_client import AIError
+    from .ai.search import index_coverage, semantic_scores, top_matches
+    from .catalog import Catalog
+    from .library import all_photos, load_photosdb
+
+    config = _load_config()
+    catalog = Catalog()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+        photos = all_photos(photosdb)
+    by_uuid = {p.uuid: p for p in photos}
+
+    indexed, total = index_coverage(config, catalog, photos)
+    if indexed == 0:
+        console.print("[red]Nothing indexed yet — run `haymish index` first.[/red]")
+        catalog.close()
+        sys.exit(1)
+    if indexed < total:
+        console.print(f"[yellow]Index covers {indexed}/{total} photos — run `haymish index` to complete it.[/yellow]")
+
+    try:
+        scores = semantic_scores(config, catalog, query)
+    except AIError as e:
+        console.print(f"[red]{e}[/red]")
+        catalog.close()
+        sys.exit(1)
+
+    matches = [(u, s) for u, s in top_matches(scores, top_k) if u in by_uuid]
+    if not matches:
+        console.print("No matches.")
+        catalog.close()
+        return
+
+    if album_name is None:
+        table = Table(title=f"Closest matches for {query!r}")
+        table.add_column("Score", justify="right")
+        table.add_column("File")
+        table.add_column("Date")
+        table.add_column("About")
+        for uuid, score in matches:
+            p = by_uuid[uuid]
+            caption = (catalog.get_caption(uuid) or "").replace("\n", " ")[:70]
+            date = getattr(p, "date", None)
+            table.add_row(f"{score:.2f}", p.original_filename,
+                          f"{date:%Y-%m-%d}" if date else "", caption)
+        console.print(table)
+        console.print("[dim]Add --album \"Some Album\" to file confirmed matches (opens review).[/dim]")
+        catalog.close()
+        return
+
+    from .config import Rule
+    from .review import run_review
+
+    rule = Rule(name=f"find:{query[:40]}",
+                semantic={"query": query, "min_score": 0.0, "top": top_k},
+                file={"album": album_name})
+
+    def on_ready(url: str) -> None:
+        console.print(f"Review matches: [bold]{url}[/bold]")
+
+    report = run_review(config, catalog, photosdb, auto_open=not no_open,
+                        on_ready=on_ready, rules_override=[rule])
+    catalog.close()
+    if report is None:
+        console.print("Nothing filed (no matches or cancelled).")
+        return
+    _print_sweep_report(report, apply_=True)
+
+
+@main.command()
+@click.argument("request")
+@click.option("--save", "save_name", default=None, metavar="NAME",
+              help="Also save the generated rule to rules.toml under this name, so it runs in future sweeps.")
+@click.option("--no-open", is_flag=True, help="Print the review URL but don't auto-open the browser.")
+def ask(request, save_name, no_open):
+    """Describe a cleanup in plain language — e.g. `haymish ask "file my recipe screenshots into Recipes"`.
+
+    A local LLM turns the request into a rule, shows you its interpretation, and
+    every matched photo goes through the browser review before anything happens.
+    Ask can file into albums, tag, and hide — it can never archive or delete.
+    """
+    from .ai.ollama_client import AIError
+    from .ai.planner import plan_from_prompt, plan_to_toml
+    from .catalog import Catalog
+    from .library import all_photos, load_photosdb
+    from .review import run_review
+
+    config = _load_config()
+    catalog = Catalog()
+    with console.status("Loading Photos library (this can take a minute on large libraries)…"):
+        photosdb = load_photosdb(config.library)
+        photos = all_photos(photosdb)
+
+    album_names = sorted({a for p in photos for a in (p.albums or [])})
+    existing_rules = {r.name for r in config.rules}
+
+    with console.status(f"Planning with {config.ai_planner_model}…"):
+        try:
+            plan = plan_from_prompt(config, request, existing_albums=album_names,
+                                     existing_rule_names=existing_rules)
+        except AIError as e:
+            console.print(f"[red]Couldn't plan that:[/red] {e}")
+            catalog.close()
+            sys.exit(1)
+
+    if save_name:
+        plan.raw["name"] = save_name
+        plan.rule.name = save_name
+
+    console.print(f"\n[bold]Plan:[/bold] {plan.description}")
+    r = plan.rule
+    if r.query:
+        console.print(f"  filter: {r.query}")
+    if r.semantic:
+        console.print(f"  content match: {r.semantic['query']!r} (min score {r.semantic.get('min_score', 0.35)})")
+    if r.classify:
+        console.print(f"  per-photo check: {r.classify['prompt']!r}")
+    if r.file:
+        console.print(f"  action: file → {r.file}")
+    if r.hide:
+        console.print(f"  action: hide after {r.hide.after_days} day(s)")
+    console.print("[dim]Matching photos open in the browser for confirmation — nothing is applied until you approve.[/dim]\n")
+
+    def on_ready(url: str) -> None:
+        console.print(f"Review: [bold]{url}[/bold]")
+
+    report = run_review(config, catalog, photosdb, auto_open=not no_open,
+                        on_ready=on_ready, rules_override=[plan.rule])
+    catalog.close()
+
+    if report is None:
+        console.print("No photos matched (or you cancelled) — nothing applied.")
+    else:
+        _print_sweep_report(report, apply_=True)
+
+    if save_name:
+        block = plan_to_toml(plan)
+        with open(config.source_path, "a") as f:
+            f.write("\n" + block)
+        console.print(f"[green]Saved[/green] rule [bold]{save_name}[/bold] to {config.source_path} — "
+                      f"it now runs in every sweep (edit or delete it there any time).")
+
+
 @main.command("confirm-deletes")
 @click.option("--no-backup-i-understand", "skip_backup_check", is_flag=True,
               help="Proceed even for photos with no verified backup copy. Not recommended — "

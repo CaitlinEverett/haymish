@@ -23,6 +23,7 @@ class Rule:
     name: str
     query: dict = field(default_factory=dict)
     detector: str | None = None          # named detector (receipts, messages, dupes, junk)
+    semantic: dict | None = None         # {query, min_score?, top?} — embedding match on the AI index
     classify: dict | None = None         # {backend, prompt, threshold}
     file: dict | None = None             # {album, keyword}
     hide: StageConfig | None = None
@@ -41,6 +42,10 @@ class Config:
     ollama_host: str
     ollama_model: str
     claude_model: str
+    ai_embed_model: str
+    ai_vision_model: str
+    ai_planner_backend: str              # "ollama" or "claude"
+    ai_planner_model: str
     rules: list[Rule]
     source_path: Path
 
@@ -56,7 +61,7 @@ VALID_QUERY_KEYS = {
     "min_age_days", "max_age_days", "albums", "exclude_albums", "keywords",
 }
 VALID_RULE_KEYS = {
-    "query", "detector", "classify", "file", "hide", "archive", "delete",
+    "query", "detector", "semantic", "classify", "file", "hide", "archive", "delete",
     "exclude_matched_by", "report_only", "enabled",
 }
 KNOWN_DETECTORS = {"receipts", "messages", "dupes", "junk"}
@@ -84,6 +89,18 @@ def _parse_rule(name: str, raw: dict) -> Rule:
     detector = raw.get("detector")
     if detector is not None and detector not in KNOWN_DETECTORS:
         raise ConfigError(f"[rule.{name}].detector {detector!r} unknown (valid: {sorted(KNOWN_DETECTORS)})")
+    semantic = raw.get("semantic")
+    if semantic is not None:
+        if not isinstance(semantic, dict) or not semantic.get("query"):
+            raise ConfigError(
+                f"[rule.{name}].semantic must be a table with a query, "
+                f'e.g. {{ query = "recipe screenshots", min_score = 0.35 }}'
+            )
+        bad = {k for k in semantic if k not in {"query", "min_score", "top"}}
+        if bad:
+            raise ConfigError(f"[rule.{name}].semantic has unknown keys: {sorted(bad)}")
+        if "min_score" in semantic and not 0 <= float(semantic["min_score"]) <= 1:
+            raise ConfigError(f"[rule.{name}].semantic.min_score must be between 0 and 1")
     classify = raw.get("classify")
     if classify is not None:
         if classify.get("backend") not in {"ollama", "claude", "apple"}:
@@ -94,6 +111,7 @@ def _parse_rule(name: str, raw: dict) -> Rule:
         name=name,
         query=query,
         detector=detector,
+        semantic=semantic,
         classify=classify,
         file=raw.get("file"),
         hide=_stage(raw.get("hide"), name, "hide"),
@@ -120,6 +138,10 @@ def load_config(path: Path | None = None) -> Config:
     report_dir = Path(g.get("report_dir", DEFAULT_REPORT_DIR)).expanduser()
     ollama = g.get("ollama", {})
     claude = g.get("claude", {})
+    ai = g.get("ai", {})
+    planner_backend = ai.get("planner_backend", "ollama")
+    if planner_backend not in {"ollama", "claude"}:
+        raise ConfigError('[global.ai].planner_backend must be "ollama" or "claude"')
 
     rules = [_parse_rule(name, body) for name, body in raw.get("rule", {}).items()]
     names = {r.name for r in rules}
@@ -144,8 +166,14 @@ def load_config(path: Path | None = None) -> Config:
         backup=backup,
         report_dir=report_dir,
         ollama_host=ollama.get("host", "http://localhost:11434"),
-        ollama_model=ollama.get("model", "gemma3:27b"),
+        # gemma3:4b is the smallest vision-capable gemma3 — right size for
+        # per-photo yes/no classification and captioning at library scale.
+        ollama_model=ollama.get("model", "gemma3:4b"),
         claude_model=claude.get("model", "claude-sonnet-5"),
+        ai_embed_model=ai.get("embed_model", "qwen3-embedding:8b"),
+        ai_vision_model=ai.get("vision_model", ollama.get("model", "gemma3:4b")),
+        ai_planner_backend=planner_backend,
+        ai_planner_model=ai.get("planner_model", "qwen3.6:27b"),
         rules=rules,
         source_path=path,
     )

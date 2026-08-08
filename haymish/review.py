@@ -258,11 +258,13 @@ class _ReviewHandler(http.server.BaseHTTPRequestHandler):
 
 
 def run_review(config: Config, catalog: Catalog, photosdb, rule_names: list[str] | None = None,
-               auto_open: bool = True, on_ready=None) -> SweepReport | None:
+               auto_open: bool = True, on_ready=None, rules_override=None) -> SweepReport | None:
     """Blocks until the user applies (or Ctrl-C cancels, applying nothing).
     on_ready(url), if given, is called once the server is listening -- lets the
-    caller print/open the URL without this function needing to know how."""
-    previews = [rp for rp in preview_sweep(config, catalog, photosdb, rule_names) if rp.candidates]
+    caller print/open the URL without this function needing to know how.
+    rules_override reviews ephemeral rules (from `ask`/`find`) instead of rules.toml."""
+    previews = [rp for rp in preview_sweep(config, catalog, photosdb, rule_names,
+                                            rules_override=rules_override) if rp.candidates]
     if not previews:
         return None
 

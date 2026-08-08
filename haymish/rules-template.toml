@@ -25,10 +25,18 @@ report_dir = "~/.haymish/reports"
 
 [global.ollama]
 host = "http://localhost:11434"
-model = "gemma3:27b"          # vision-capable; swap for a smaller model (e.g. qwen2.5vl:7b) for speed
+model = "gemma3:4b"           # vision-capable and fast; any multimodal Ollama model works
 
 [global.claude]
 model = "claude-sonnet-5"     # used only by rules with backend = "claude"; needs ANTHROPIC_API_KEY
+
+[global.ai]
+# The AI index behind `haymish index` / `find` / `ask` and semantic rules.
+# All local via Ollama by default; nothing leaves this Mac.
+embed_model = "qwen3-embedding:8b"    # text embeddings for semantic search
+# vision_model = "gemma3:4b"          # captions; defaults to [global.ollama].model
+planner_model = "qwen3.6:27b"         # turns `haymish ask "..."` into a rule
+# planner_backend = "claude"          # opt-in: use the Claude API for planning instead
 
 # ---------------------------------------------------------------------------
 # 1. Ad/product screenshots — the core roll-clutter fix. Screenshots stay
@@ -80,3 +88,14 @@ file = { album = "Swept/Duplicates" }
 [rule.junk]
 detector = "junk"
 report_only = true
+
+# ---------------------------------------------------------------------------
+# Semantic rules: match by CONTENT using the AI index (`haymish index` first).
+# `semantic.query` is a plain-language description; min_score tunes strictness.
+# Tip: prototype these conversationally — `haymish ask "file my recipe
+# screenshots into Recipes" --save recipes` writes the rule here for you.
+#
+# [rule.recipes]
+# query = { screenshot = true }
+# semantic = { query = "screenshot of a cooking recipe with ingredients or instructions", min_score = 0.35 }
+# file = { album = "Recipes" }

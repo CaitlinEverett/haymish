@@ -88,17 +88,41 @@ def check_automation() -> tuple[bool, str, str]:
 
 
 def check_ollama(host: str, model: str) -> tuple[bool, str, str]:
-    try:
-        r = httpx.get(f"{host}/api/tags", timeout=3)
-        models = [m["name"] for m in r.json().get("models", [])]
-    except Exception:
+    from .ai.ollama_client import available_models, model_available
+
+    models = available_models(host)
+    if not models:
         return False, "Ollama", f"not reachable at {host} — LLM rules will be skipped"
-    if any(model.split(":")[0] in m for m in models):
+    # Exact-tag check: gemma3:27b pointing at a machine that only has gemma3:4b
+    # must fail here, not 404 mid-sweep.
+    if model_available(host, model):
         return True, "Ollama", f"{model} available"
-    vision = [m for m in models if any(v in m for v in VISION_MODEL_MARKERS)]
+    vision = sorted(m for m in models if any(v in m for v in VISION_MODEL_MARKERS))
     return False, "Ollama", (
         f"{model} not pulled. Vision-capable models present: {vision or 'none'} — "
         f"`ollama pull {model}` or point [global.ollama].model at one of those."
+    )
+
+
+def check_ai_index(config) -> tuple[bool, str, str]:
+    """Embedding + planner models for `haymish index/find/ask` and semantic rules."""
+    from .ai.ollama_client import available_models
+
+    models = available_models(config.ollama_host)
+    if not models:
+        return False, "AI index (ask/find)", (
+            f"Ollama not reachable at {config.ollama_host} — index/find/ask unavailable"
+        )
+    missing = [m for m in (config.ai_embed_model, config.ai_planner_model)
+               if m not in models and m.split(":")[0] not in models]
+    if missing:
+        return False, "AI index (ask/find)", (
+            f"missing model(s): {', '.join(missing)} — `ollama pull {missing[0]}` "
+            f"(or change [global.ai] in rules.toml)"
+        )
+    return True, "AI index (ask/find)", (
+        f"embed={config.ai_embed_model}, planner={config.ai_planner_model}, "
+        f"vision={config.ai_vision_model}"
     )
 
 
@@ -127,5 +151,6 @@ def run_all(config=None) -> list[tuple[bool, str, str]]:
     checks.append(check_automation())
     if config:
         checks.append(check_ollama(config.ollama_host, config.ollama_model))
+        checks.append(check_ai_index(config))
         checks.append(check_backup(config.backup))
     return checks
