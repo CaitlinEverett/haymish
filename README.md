@@ -93,7 +93,7 @@ works on videos the same as photos.
 | `undo` | Reverse the last sweep's album/keyword/hide actions |
 | `archive` | Export originals to the backup volume, checksum-verified |
 | `import <files>` | Import files into Photos and immediately run rules on them |
-| `schedule` | Install a launchd job for periodic sweeps |
+| `schedule` | Install a launchd job: refreshes the AI index, then sweeps — periodically, unattended |
 | `menubar` | Menu-bar app: Review Now, Sweep Now, Confirm Deletes |
 | `doctor` | Permission / environment checks |
 

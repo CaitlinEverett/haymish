@@ -1,16 +1,20 @@
-"""Installs/removes a launchd LaunchAgent that runs `haymish sweep --apply` on a schedule.
+"""Installs/removes a launchd LaunchAgent that runs `haymish index` then
+`haymish sweep --apply` on a schedule, so new photos landing since the last run
+get captioned/embedded (so find/ask/semantic rules keep seeing them) and swept
+in one pass, unattended.
 
-SAFETY INVARIANT: scheduling `sweep --apply` to run unattended is safe by
-construction. Per this codebase's design (see haymish/actions/delete.py),
-the "delete" lifecycle stage never deletes anything itself — it only stages
-candidates via Catalog.stage_delete(). Turning a staged delete into an actual
-deletion requires a separate, human-run `haymish confirm-deletes` command,
-which shows a typed confirmation prompt AND macOS's own un-bypassable system
-dialog. There is no unattended-deletion path anywhere in this codebase. This
-module must never add one — do not wire a flag or timer here that also
-triggers `confirm-deletes` (or anything downstream of it) from the scheduled
-job, ever. If that invariant ever needs to change, it's a deliberate decision
-made elsewhere, not something scheduler.py should do on its own.
+SAFETY INVARIANT: scheduling this to run unattended is safe by construction.
+Per this codebase's design (see haymish/actions/delete.py), the "delete"
+lifecycle stage never deletes anything itself — it only stages candidates via
+Catalog.stage_delete(). Turning a staged delete into an actual deletion
+requires a separate, human-run `haymish confirm-deletes` command, which shows
+a typed confirmation prompt AND macOS's own un-bypassable system dialog.
+There is no unattended-deletion path anywhere in this codebase. Indexing is
+likewise inert with respect to the library — it only reads photos and writes
+to the local catalog. This module must never add a path to `confirm-deletes`
+(or anything downstream of it) from the scheduled job, ever. If that
+invariant ever needs to change, it's a deliberate decision made elsewhere,
+not something scheduler.py should do on its own.
 """
 
 from __future__ import annotations
@@ -30,19 +34,33 @@ LOG_PATH = Path.home() / ".haymish" / "scheduler.log"
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
-def _program_arguments() -> list[str]:
+def _haymish_invocation() -> str:
+    """A shell-quoted command that runs `haymish`, preferring the installed
+    binary and falling back to `uv run` from this checkout."""
     haymish_bin = shutil.which("haymish")
     if haymish_bin:
-        return [haymish_bin, "sweep", "--apply"]
+        return f'"{haymish_bin}"'
 
     uv_bin = shutil.which("uv")
     if uv_bin:
-        return [uv_bin, "run", "--project", str(_PROJECT_DIR), "haymish", "sweep", "--apply"]
+        return f'"{uv_bin}" run --project "{_PROJECT_DIR}" haymish'
 
     raise RuntimeError(
         "can't find `haymish` or `uv` on PATH — install one of them (or activate "
         "the project's venv) before running `haymish schedule`"
     )
+
+
+def _program_arguments(refresh_index: bool = True) -> list[str]:
+    haymish = _haymish_invocation()
+    sweep_cmd = f"{haymish} sweep --apply"
+    if not refresh_index:
+        # launchd's ProgramArguments takes one argv, not a shell pipeline -- a
+        # single command still needs to go through a shell to expand quoting
+        # consistently with the chained case below, so this stays uniform.
+        return [shutil.which("zsh") or "/bin/sh", "-lc", sweep_cmd]
+    index_cmd = f"{haymish} index"
+    return [shutil.which("zsh") or "/bin/sh", "-lc", f"{index_cmd} && {sweep_cmd}"]
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess:
@@ -56,7 +74,7 @@ def _bootout_existing() -> None:
         _launchctl("unload", str(PLIST_PATH))
 
 
-def install(interval_hours: int = 24) -> None:
+def install(interval_hours: int = 24, refresh_index: bool = True) -> None:
     ensure_app_dirs()
     APP_DIR.mkdir(exist_ok=True)
 
@@ -65,7 +83,7 @@ def install(interval_hours: int = 24) -> None:
 
     plist = {
         "Label": PLIST_LABEL,
-        "ProgramArguments": _program_arguments(),
+        "ProgramArguments": _program_arguments(refresh_index=refresh_index),
         "StartInterval": interval_hours * 3600,
         "StandardOutPath": str(LOG_PATH),
         "StandardErrorPath": str(LOG_PATH),

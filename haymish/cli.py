@@ -669,11 +669,16 @@ def import_(paths, apply_, album_name):
 
 
 @main.command()
-@click.option("--interval-hours", default=24, show_default=True, type=int, help="How often to sweep.")
-@click.option("--uninstall", "do_uninstall", is_flag=True, help="Remove the scheduled sweep.")
+@click.option("--interval-hours", default=24, show_default=True, type=int, help="How often to run.")
+@click.option("--no-refresh-index", "no_refresh_index", is_flag=True,
+              help="Skip `index` before each scheduled sweep — new photos won't be captioned/"
+                   "embedded automatically, so find/ask/semantic rules will miss them until "
+                   "you run `haymish index` yourself.")
+@click.option("--uninstall", "do_uninstall", is_flag=True, help="Remove the scheduled job.")
 @click.option("--status", "show_status", is_flag=True, help="Show whether it's installed/loaded.")
-def schedule(interval_hours, do_uninstall, show_status):
-    """Install, remove, or check the launchd job that runs `sweep --apply` periodically.
+def schedule(interval_hours, no_refresh_index, do_uninstall, show_status):
+    """Install, remove, or check the launchd job that keeps Haymish current: refreshes
+    the AI index (new photos since last run only — incremental) then runs `sweep --apply`.
 
     Never schedules confirm-deletes — deletion always requires a human present.
     """
@@ -688,16 +693,17 @@ def schedule(interval_hours, do_uninstall, show_status):
 
     if do_uninstall:
         scheduler.uninstall()
-        console.print("Removed the scheduled sweep.")
+        console.print("Removed the scheduled job.")
         return
 
     try:
-        scheduler.install(interval_hours=interval_hours)
+        scheduler.install(interval_hours=interval_hours, refresh_index=not no_refresh_index)
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
+    steps = "`index` then `sweep --apply`" if not no_refresh_index else "`sweep --apply`"
     console.print(
-        f"[green]Scheduled[/green] — `sweep --apply` will run every {interval_hours}h "
+        f"[green]Scheduled[/green] — {steps} will run every {interval_hours}h "
         f"(logs: ~/.haymish/scheduler.log). This never finalizes a deletion; run "
         f"`haymish confirm-deletes` yourself when you're ready."
     )
