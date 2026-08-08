@@ -1099,18 +1099,33 @@ def menubar():
 
 
 @main.command()
-@click.option("--port", default=None, type=int,
-              help="Port to bind (default 8787; falls back to a free port if taken).")
-def serve(port):
+@click.option("--port", default=None, type=int, help="Port to bind (default 8787).")
+@click.option("--replace", is_flag=True,
+              help="Stop an already-running Haymish daemon and take over — use this "
+                   "after updating, so you're not left talking to a stale build.")
+def serve(port, replace):
     """Run the Haymish daemon: dashboard at http://127.0.0.1:8787 plus the API the
     menu bar and MCP server use. Binds localhost only; mutations require the
     per-run token and always go through the browser review. No delete endpoint."""
-    from .server import DEFAULT_PORT, serve as run_serve
+    from .server import DEFAULT_PORT, DaemonAlreadyRunning, serve as run_serve
 
     config = _load_config()
+    target = port or DEFAULT_PORT
     console.print(f"[green]Haymish daemon starting[/green] — dashboard will be at "
-                  f"http://127.0.0.1:{port or DEFAULT_PORT} (Ctrl-C to stop)")
-    run_serve(config, port=port or DEFAULT_PORT)
+                  f"http://127.0.0.1:{target} (Ctrl-C to stop)")
+    try:
+        run_serve(config, port=target, replace=replace)
+    except DaemonAlreadyRunning as e:
+        console.print(
+            f"[yellow]Already running[/yellow] at [bold]{e.url}[/bold]"
+            + (f" (pid {e.pid})" if e.pid else "")
+            + "\n\nThat one may predate your latest changes. To restart it with "
+              "current code:\n  [bold]haymish serve --replace[/bold]"
+        )
+        sys.exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 @main.command()

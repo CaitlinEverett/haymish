@@ -25,7 +25,9 @@ import importlib.resources
 import json
 import os
 import secrets
+import signal
 import threading
+import time
 import uuid as uuidlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -583,10 +585,42 @@ def read_state_file() -> dict | None:
         return None
 
 
-def serve(config: Config, port: int = DEFAULT_PORT, photosdb=None) -> None:
-    """Blocking. Binds 127.0.0.1 only; falls back to an ephemeral port if the
-    requested one is taken by something that isn't us. photosdb is injectable
-    for tests (skips the real library load, which needs Full Disk Access)."""
+class DaemonAlreadyRunning(RuntimeError):
+    """Another Haymish daemon holds the port. Carries its url and pid."""
+
+    def __init__(self, url: str, pid: int | None):
+        self.url, self.pid = url, pid
+        super().__init__(f"a Haymish daemon is already running at {url}")
+
+
+def serve(config: Config, port: int = DEFAULT_PORT, photosdb=None,
+          replace: bool = False) -> None:
+    """Blocking. Binds 127.0.0.1 only. photosdb is injectable for tests (skips
+    the real library load, which needs Full Disk Access).
+
+    Refuses to start a second daemon rather than silently taking an ephemeral
+    port. That fallback used to strand people: an old daemon kept :8787, the new
+    one landed on a random port, and the browser at the address they knew showed
+    a stale build missing today's endpoints -- which reads as "the feature is
+    broken", not "you're looking at the wrong process". With replace=True the
+    running one is stopped first.
+    """
+    existing = daemon_url()
+    if existing:
+        saved = read_state_file() or {}
+        pid = saved.get("pid")
+        if not replace:
+            raise DaemonAlreadyRunning(existing, pid)
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            for _ in range(40):          # give it a moment to release the port
+                if daemon_url() is None:
+                    break
+                time.sleep(0.1)
+
     state = ServeState(config)
     if photosdb is not None:
         state.photosdb = photosdb
@@ -597,8 +631,13 @@ def serve(config: Config, port: int = DEFAULT_PORT, photosdb=None) -> None:
     handler = type("BoundHandler", (HaymishHandler,), {"state": state})
     try:
         server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
-    except OSError:
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    except OSError as e:
+        # Something that isn't us holds the port -- say which, don't drift to a
+        # random one the user will never think to open.
+        raise RuntimeError(
+            f"port {port} is in use by another program (not Haymish): {e}. "
+            f"Free it, or run `haymish serve --port <other>`."
+        ) from None
     actual_port = server.server_address[1]
     write_state_file(actual_port, state.token)
 
