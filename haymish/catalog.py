@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS review_rejected(
   PRIMARY KEY(uuid, rule)
 );
 CREATE TABLE IF NOT EXISTS captions(
-  uuid TEXT PRIMARY KEY, caption TEXT, model TEXT, computed_at TEXT
+  uuid TEXT NOT NULL, caption TEXT, model TEXT NOT NULL, computed_at TEXT,
+  PRIMARY KEY(uuid, model)
 );
 CREATE TABLE IF NOT EXISTS embeddings(
   uuid TEXT NOT NULL, model TEXT NOT NULL, dim INTEGER, vector BLOB, computed_at TEXT,
@@ -79,6 +80,36 @@ class Catalog:
         self.db = sqlite3.connect(path or CATALOG_PATH, check_same_thread=False)
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        """Schema upgrades for catalogs created by older versions.
+
+        captions was originally PRIMARY KEY(uuid) -- one caption per photo, with
+        no way to tell which model wrote it. That made a vision-model upgrade
+        invisible: index would see "already captioned" and skip forever, quietly
+        serving stale captions. Now keyed by (uuid, model); existing rows keep
+        their recorded model (or 'unknown' if absent) so they show up as stale
+        rather than being silently trusted or silently destroyed.
+        """
+        cols = self.db.execute("PRAGMA table_info(captions)").fetchall()
+        if not cols:
+            return
+        pk_cols = [c[1] for c in cols if c[5]]  # c[5] = pk position, 0 when not pk
+        if pk_cols == ["uuid", "model"]:
+            return
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS captions_new(
+              uuid TEXT NOT NULL, caption TEXT, model TEXT NOT NULL, computed_at TEXT,
+              PRIMARY KEY(uuid, model)
+            );
+            INSERT OR REPLACE INTO captions_new(uuid, caption, model, computed_at)
+              SELECT uuid, caption, COALESCE(NULLIF(model, ''), 'unknown'), computed_at
+              FROM captions;
+            DROP TABLE captions;
+            ALTER TABLE captions_new RENAME TO captions;
+        """)
+        self.db.commit()
 
     def close(self):
         self.db.close()
@@ -237,8 +268,20 @@ class Catalog:
         return {r[0] for r in rows}
 
     # -- AI index (captions + embeddings) --------------------------------------
-    def get_caption(self, uuid: str) -> str | None:
-        row = self.db.execute("SELECT caption FROM captions WHERE uuid=?", (uuid,)).fetchone()
+    def get_caption(self, uuid: str, model: str | None = None) -> str | None:
+        """Caption for this photo. With a model, returns only that model's caption
+        (so an upgraded vision model doesn't silently reuse the old one). Without,
+        returns the most recent caption from any model -- for display, where a
+        stale caption still beats none."""
+        if model is not None:
+            row = self.db.execute(
+                "SELECT caption FROM captions WHERE uuid=? AND model=?", (uuid, model)
+            ).fetchone()
+        else:
+            row = self.db.execute(
+                "SELECT caption FROM captions WHERE uuid=? ORDER BY computed_at DESC LIMIT 1",
+                (uuid,),
+            ).fetchone()
         return row[0] if row else None
 
     def put_caption(self, uuid: str, caption: str, model: str):
@@ -247,8 +290,31 @@ class Catalog:
         )
         self.db.commit()
 
-    def captioned_uuids(self) -> set[str]:
-        return {r[0] for r in self.db.execute("SELECT uuid FROM captions").fetchall()}
+    def captioned_uuids(self, model: str | None = None) -> set[str]:
+        if model is not None:
+            rows = self.db.execute("SELECT uuid FROM captions WHERE model=?", (model,)).fetchall()
+        else:
+            rows = self.db.execute("SELECT uuid FROM captions").fetchall()
+        return {r[0] for r in rows}
+
+    def caption_models(self) -> dict[str, int]:
+        """model -> caption count, so `doctor` can report "1,204 captions from a
+        model you no longer use" instead of leaving staleness invisible."""
+        rows = self.db.execute(
+            "SELECT model, COUNT(*) FROM captions GROUP BY model ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def clear_captions(self, model: str | None = None) -> int:
+        """Drop captions (all, or just one model's) so they get regenerated.
+        Returns rows removed. Embeddings are left alone -- they're rebuilt from
+        captions on the next index pass anyway."""
+        if model is not None:
+            cur = self.db.execute("DELETE FROM captions WHERE model=?", (model,))
+        else:
+            cur = self.db.execute("DELETE FROM captions")
+        self.db.commit()
+        return cur.rowcount
 
     def put_embedding(self, uuid: str, model: str, vector: bytes, dim: int):
         self.db.execute(

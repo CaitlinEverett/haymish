@@ -10,6 +10,7 @@ caption could be generated (iCloud-only originals with no local derivative).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import numpy as np
 from .. import library
 from ..catalog import Catalog
 from ..config import Config
+from ..hardware import recommended_caption_workers
 from . import ollama_client
 from .ollama_client import AIError
 
@@ -39,6 +41,7 @@ class IndexStats:
     caption_skipped_no_image: int = 0
     embedded: int = 0
     already_indexed: int = 0
+    caption_workers: int = 1
     errors: list[str] = field(default_factory=list)
 
 
@@ -96,14 +99,19 @@ def vector_to_blob(vector: list[float]) -> tuple[bytes, int]:
 
 
 def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool = True,
-                 limit: int | None = None, progress=None) -> IndexStats:
+                 limit: int | None = None, progress=None,
+                 concurrency: int | None = None) -> IndexStats:
     """Captions (optional) then embeddings, incremental against the catalog.
+    concurrency caps parallel caption requests; None auto-sizes to the machine.
     progress(done, total, phase) is called per photo for UI. Caption failures are
     per-photo (logged, photo still gets embedded from OCR/labels); embedding
     failures abort — without the embedding model there's no index to build."""
     stats = IndexStats()
     embedded = catalog.embedded_uuids(config.ai_embed_model)
-    captioned = catalog.captioned_uuids()
+    # Model-scoped: a photo captioned by a DIFFERENT vision model counts as
+    # un-captioned for the current one, so upgrading the model re-captions
+    # instead of silently reusing stale text forever.
+    captioned = catalog.captioned_uuids(config.ai_vision_model)
 
     todo = [p for p in photos if p.uuid not in embedded or (captions and p.uuid not in captioned)]
     stats.already_indexed = len(photos) - len(todo)
@@ -121,26 +129,44 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
             )
             captions = False
 
-    for i, photo in enumerate(todo):
-        if captions and photo.uuid not in captioned:
+    if captions:
+        workers = concurrency or recommended_caption_workers()
+        stats.caption_workers = workers
+        needs_caption = [p for p in todo if p.uuid not in captioned]
+        done = 0
+
+        def caption_one(photo):
+            """Returns (photo, caption_or_None, error_or_None). Runs on a worker
+            thread: does the network call only -- the catalog write happens on
+            the main thread below, keeping sqlite access single-threaded here."""
             try:
-                caption = caption_photo(config, photo)
-                if caption is None:
+                return photo, caption_photo(config, photo), None
+            except AIError as e:
+                return photo, None, e
+
+        # Vision inference is the whole cost of indexing and it parallelizes well
+        # on Apple Silicon (measured M4 Max: 5.7 s/photo sequential -> 1.8 s/photo
+        # at 12-way). Workers only do HTTP; results are committed here in order.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for photo, caption, error in pool.map(caption_one, needs_caption):
+                if error is not None:
+                    stats.caption_failed += 1
+                    if len(stats.errors) < 5:
+                        stats.errors.append(f"caption failed for {photo.uuid}: {error}")
+                elif caption is None:
                     stats.caption_skipped_no_image += 1
                 else:
                     catalog.put_caption(photo.uuid, caption, config.ai_vision_model)
                     stats.captioned += 1
-            except AIError as e:
-                stats.caption_failed += 1
-                if len(stats.errors) < 5:
-                    stats.errors.append(f"caption failed for {photo.uuid}: {e}")
-        if progress:
-            progress(i + 1, total, "caption")
+                done += 1
+                if progress:
+                    progress(done, len(needs_caption), "caption")
 
     to_embed = [p for p in todo if p.uuid not in embedded]
     for start in range(0, len(to_embed), EMBED_BATCH):
         batch = to_embed[start:start + EMBED_BATCH]
-        docs = [build_document(p, catalog.get_caption(p.uuid)) for p in batch]
+        docs = [build_document(p, catalog.get_caption(p.uuid, config.ai_vision_model))
+                for p in batch]
         vectors = ollama_client.embed(config.ollama_host, config.ai_embed_model, docs)
         for photo, vector in zip(batch, vectors):
             blob, dim = vector_to_blob(vector)

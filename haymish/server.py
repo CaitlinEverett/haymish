@@ -288,12 +288,21 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             last = catalog.recent_actions(limit=1)
             embedded = catalog.embedded_uuids(state.config.ai_embed_model)
             run_id = catalog.last_run_id()
+            caption_models = catalog.caption_models()
         finally:
             catalog.close()
 
         library_stats = {"loaded": state.photosdb is not None,
                          "error": state.photosdb_error}
-        index = {"embedded": len(embedded)}
+        # Caption models other than the configured one mean the vision model was
+        # upgraded and those captions are stale -- surfaced so the dashboard can
+        # offer a refresh instead of silently serving old descriptions.
+        index = {
+            "embedded": len(embedded),
+            "caption_models": caption_models,
+            "stale_captions": sum(n for m, n in caption_models.items()
+                                   if m != state.config.ai_vision_model),
+        }
         if state.photosdb is not None:
             photos = library.all_photos(state.photosdb)
             library_stats.update(
@@ -421,6 +430,7 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/index/build":
             captions = bool(body.get("captions", True))
             limit = body.get("limit")
+            concurrency = body.get("concurrency")
 
             def run(job: Job):
                 from .ai.indexer import index_photos
@@ -434,11 +444,13 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
                     stats = index_photos(state.config, catalog, library.all_photos(photosdb),
                                           captions=captions,
                                           limit=int(limit) if limit else None,
-                                          progress=progress)
+                                          progress=progress,
+                                          concurrency=int(concurrency) if concurrency else None)
                 finally:
                     catalog.close()
                 return {"embedded": stats.embedded, "captioned": stats.captioned,
-                        "already_indexed": stats.already_indexed, "errors": stats.errors}
+                        "already_indexed": stats.already_indexed,
+                        "caption_workers": stats.caption_workers, "errors": stats.errors}
 
             job = state.start_job("index", run)
             self._json({"job": job.id})

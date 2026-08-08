@@ -126,6 +126,42 @@ def check_ai_index(config) -> tuple[bool, str, str]:
     )
 
 
+def check_hardware() -> tuple[bool, str, str]:
+    """Informational: what this Mac is, and how wide indexing will run on it."""
+    from .hardware import detect, recommended_caption_workers
+
+    hw = detect()
+    return True, "Hardware", f"{hw.describe()} — captioning {recommended_caption_workers(hw)} at a time"
+
+
+def check_index_freshness(config) -> tuple[bool, str, str]:
+    """Captions written by a vision model you no longer use are stale: `index` skips
+    those photos (it's model-scoped) but `find`/`ask` still read the old text."""
+    from .catalog import Catalog
+
+    current = config.ai_vision_model
+    try:
+        catalog = Catalog()
+    except Exception as e:
+        return False, "Index freshness", f"can't open the catalog: {type(e).__name__}: {e}"
+    try:
+        models = catalog.caption_models()
+    finally:
+        catalog.close()
+
+    stale = {m: n for m, n in models.items() if m != current}
+    if stale:
+        total = sum(stale.values())
+        which = ", ".join(m for m, _ in sorted(stale.items(), key=lambda kv: -kv[1]))
+        return False, "Index freshness", (
+            f"{total:,} caption(s) from {which} but you're now configured for {current} "
+            f"— run `haymish index --reindex-captions` to refresh"
+        )
+    if not models:
+        return True, "Index freshness", f"no captions yet — run `haymish index` (vision model {current})"
+    return True, "Index freshness", f"{models[current]:,} caption(s), all from {current}"
+
+
 def check_backup(backup: Path | None) -> tuple[bool, str, str]:
     if backup is None:
         return True, "Backup volume", (
@@ -149,8 +185,10 @@ def run_all(config=None) -> list[tuple[bool, str, str]]:
         checks.append(check_photosdb(library))
     checks.append(check_photokit_auth())
     checks.append(check_automation())
+    checks.append(check_hardware())
     if config:
         checks.append(check_ollama(config.ollama_host, config.ollama_model))
         checks.append(check_ai_index(config))
+        checks.append(check_index_freshness(config))
         checks.append(check_backup(config.backup))
     return checks

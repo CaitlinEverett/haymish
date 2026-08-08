@@ -223,12 +223,18 @@ def review(rule, no_open):
               help="Skip vision-LLM captions; index only Photos' own OCR text and labels (much faster).")
 @click.option("--limit", type=int, default=None,
               help="Index at most N un-indexed photos this run (useful for a first taste).")
-def index(no_captions, limit):
+@click.option("--concurrency", type=int, default=None,
+              help="How many captions to run in parallel (default: auto-sized to this Mac).")
+@click.option("--reindex-captions", "reindex_captions", is_flag=True,
+              help="Drop captions written by any other vision model first, so they're "
+                   "regenerated with the model currently configured in rules.toml.")
+def index(no_captions, limit, concurrency, reindex_captions):
     """Build the AI index: a caption + embedding per photo, cached locally.
 
     Powers `haymish find`, `haymish ask`, and `semantic = {…}` rules. Incremental —
     re-running only processes new photos. Everything stays on this Mac.
     """
+    from . import hardware
     from .ai.indexer import index_photos
     from .ai.ollama_client import AIError
     from .catalog import Catalog
@@ -236,6 +242,27 @@ def index(no_captions, limit):
 
     config = _load_config()
     catalog = Catalog()
+
+    if reindex_captions:
+        stale = {m: n for m, n in catalog.caption_models().items()
+                 if m != config.ai_vision_model}
+        cleared = sum(catalog.clear_captions(model) for model in stale)
+        if cleared:
+            which = ", ".join(f"{n:,} from {m}" for m, n in sorted(stale.items(),
+                                                                   key=lambda kv: -kv[1]))
+            console.print(f"Cleared [bold]{cleared:,}[/bold] stale caption(s) ({which}) — "
+                          f"they'll be regenerated with {config.ai_vision_model}.")
+        else:
+            console.print(f"No stale captions — everything already came from "
+                          f"{config.ai_vision_model}.")
+
+    hw = hardware.detect()
+    if no_captions:
+        console.print(f"{hw.describe()} — captions disabled (OCR text and labels only)")
+    else:
+        workers = concurrency or hardware.recommended_caption_workers(hw)
+        console.print(f"{hw.describe()} — captioning {workers} at a time")
+
     with console.status("Loading Photos library (this can take a minute on large libraries)…"):
         photosdb = load_photosdb(config.library)
         # Videos included: they're captioned/embedded from their poster frame,
@@ -255,7 +282,8 @@ def index(no_captions, limit):
 
         try:
             stats = index_photos(config, catalog, photos, captions=not no_captions,
-                                  limit=limit, progress=on_progress)
+                                  limit=limit, progress=on_progress,
+                                  concurrency=concurrency)
         except AIError as e:
             console.print(f"[red]{e}[/red]")
             catalog.close()
@@ -670,15 +698,24 @@ def import_(paths, apply_, album_name):
 
 @main.command()
 @click.option("--interval-hours", default=24, show_default=True, type=int, help="How often to run.")
+@click.option("--at-hour", "at_hour", type=int, default=None, metavar="INTEGER",
+              help="Run daily at this hour (0-23) instead of on an interval — e.g. 3 for 3am.")
+@click.option("--no-defer-when-busy", "no_defer_when_busy", is_flag=True,
+              help="Run even when the Mac is busy or on battery (by default a scheduled "
+                   "run skips those cycles and tries again at the next one).")
 @click.option("--no-refresh-index", "no_refresh_index", is_flag=True,
               help="Skip `index` before each scheduled sweep — new photos won't be captioned/"
                    "embedded automatically, so find/ask/semantic rules will miss them until "
                    "you run `haymish index` yourself.")
 @click.option("--uninstall", "do_uninstall", is_flag=True, help="Remove the scheduled job.")
 @click.option("--status", "show_status", is_flag=True, help="Show whether it's installed/loaded.")
-def schedule(interval_hours, no_refresh_index, do_uninstall, show_status):
+def schedule(interval_hours, at_hour, no_defer_when_busy, no_refresh_index, do_uninstall,
+             show_status):
     """Install, remove, or check the launchd job that keeps Haymish current: refreshes
     the AI index (new photos since last run only — incremental) then runs `sweep --apply`.
+
+    With --at-hour the job runs once a day at that hour. launchd doesn't fire while
+    the Mac is asleep, so an overnight job runs on wake if its time already passed.
 
     Never schedules confirm-deletes — deletion always requires a human present.
     """
@@ -687,6 +724,12 @@ def schedule(interval_hours, no_refresh_index, do_uninstall, show_status):
     if show_status:
         st = scheduler.status()
         console.print(f"installed: {st['installed']}  loaded: {st['loaded']}")
+        if st["installed"]:
+            console.print(
+                f"runs: {st['schedule']} — "
+                f"{'index then sweep --apply' if st['refreshes_index'] else 'sweep --apply'}"
+                f"{'' if st['defers_when_busy'] else ' (never defers)'}"
+            )
         if st["log_tail"]:
             console.print(st["log_tail"])
         return
@@ -696,17 +739,57 @@ def schedule(interval_hours, no_refresh_index, do_uninstall, show_status):
         console.print("Removed the scheduled job.")
         return
 
+    if at_hour is not None and not 0 <= at_hour <= 23:
+        console.print(f"[red]--at-hour must be between 0 and 23 (got {at_hour}).[/red]")
+        sys.exit(1)
+
     try:
-        scheduler.install(interval_hours=interval_hours, refresh_index=not no_refresh_index)
-    except RuntimeError as e:
+        scheduler.install(interval_hours=interval_hours, refresh_index=not no_refresh_index,
+                          at_hour=at_hour, defer_when_busy=not no_defer_when_busy)
+    except (RuntimeError, ValueError) as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
+
     steps = "`index` then `sweep --apply`" if not no_refresh_index else "`sweep --apply`"
+    when = (f"daily at {at_hour}:00 (on wake, if the Mac was asleep then)"
+            if at_hour is not None else f"every {interval_hours}h")
+    gating = ("skipping any run that lands while the Mac is busy or on battery"
+              if not no_defer_when_busy else "running even when the Mac is busy or on battery")
     console.print(
-        f"[green]Scheduled[/green] — {steps} will run every {interval_hours}h "
+        f"[green]Scheduled[/green] — {steps} will run {when}, {gating} "
         f"(logs: ~/.haymish/scheduler.log). This never finalizes a deletion; run "
         f"`haymish confirm-deletes` yourself when you're ready."
     )
+
+
+@main.command("scheduled-run")
+@click.option("--force", is_flag=True,
+              help="Run even if the Mac looks busy or is on battery.")
+@click.option("--no-index", "no_index", is_flag=True,
+              help="Sweep only — skip the index refresh.")
+@click.pass_context
+def scheduled_run(ctx, force, no_index):
+    """What the launchd job invokes: index, then `sweep --apply`, unattended.
+
+    Checks system load first and exits successfully without doing anything when
+    the Mac is busy or on battery — deferring is a normal outcome, not a failure,
+    so launchd doesn't treat it as a crashed job. Pass --force to run anyway.
+
+    Like every unattended path in Haymish, this never deletes: sweep stages
+    delete candidates at most, and only a human running `haymish confirm-deletes`
+    can finalize them.
+    """
+    from . import scheduler
+
+    if not force:
+        reason = scheduler.should_defer()
+        if reason:
+            console.print(f"Deferring scheduled run — {reason}")
+            return
+
+    if not no_index:
+        ctx.invoke(index)
+    ctx.invoke(sweep, rule=None, apply_=True)
 
 
 @main.command()
