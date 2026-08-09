@@ -841,13 +841,17 @@ function galleryPanelHtml(ev, idx) {
       }).join('') + '</div>';
       const notes = [];
       if (!showAll && photos.length > shown.length) {
+        // Every member is loaded now (paged in above), so this number is the
+        // real total — it used to read "Show all 400" for a 457-photo event.
         notes.push('<button type="button" class="link-btn" data-gal-action="show-all">Show all ' +
           photos.length + '</button>');
       }
       const count = galleryCount(ev);
       if (count > photos.length) {
-        notes.push('<span class="muted">Previewing the first ' + photos.length + ' of ' +
-          count + ' photos.</span>');
+        // Only reachable when the library couldn't produce some photos at all
+        // (e.g. missing from the library since clustering) -- not a display cap.
+        notes.push('<span class="muted">' + photos.length + ' of ' + count +
+          ' photos available.</span>');
       }
       if (notes.length) {
         body += '<p class="gal-more">' + notes.join(' &nbsp; ') + '</p>';
@@ -956,12 +960,23 @@ async function toggleGallery(idx) {
   galleryLoading = ev.key;
   renderGalleries();
   try {
-    const uuids = (ev.uuids || []).slice(0, GALLERY_MAX);
-    const result = await runJob('/api/gallery/thumbs', { uuids }, p => {
-      const el = $('gallery-panel-progress');
-      if (el) el.textContent = phaseText(p);
-    });
-    galleryMembers.set(ev.key, (result && result.photos) || []);
+    // The endpoint caps each request at GALLERY_MAX, so page through rather
+    // than truncating: a 457-photo event previously lost 57 photos outright and
+    // offered a "Show all 400" button that couldn't reach them.
+    const all = ev.uuids || [];
+    const photos = [];
+    for (let start = 0; start < all.length; start += GALLERY_MAX) {
+      const batch = all.slice(start, start + GALLERY_MAX);
+      const result = await runJob('/api/gallery/thumbs', { uuids: batch }, p => {
+        const el = $('gallery-panel-progress');
+        if (!el) return;
+        // Report progress across the whole event, not just the current page.
+        const done = start + (p && p.done ? p.done : 0);
+        el.textContent = 'loading photos… ' + Math.min(done, all.length) + '/' + all.length;
+      });
+      photos.push(...((result && result.photos) || []));
+    }
+    galleryMembers.set(ev.key, photos);
   } catch (err) {
     if (galleryExpanded === ev.key) galleryExpanded = null;
     banner('Could not load gallery photos: ' + err.message);
