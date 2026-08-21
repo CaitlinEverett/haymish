@@ -526,17 +526,18 @@ def index(no_captions, limit, concurrency, reindex_captions, rule_name):
     catalog = Catalog()
 
     if reindex_captions:
-        stale = {m: n for m, n in catalog.caption_models().items()
-                 if m != config.ai_vision_model}
+        from .ai.indexer import caption_key
+
+        current_key = caption_key(config)   # model + prompt version, as stored
+        stale = {m: n for m, n in catalog.caption_models().items() if m != current_key}
         cleared = sum(catalog.clear_captions(model) for model in stale)
         if cleared:
             which = ", ".join(f"{n:,} from {m}" for m, n in sorted(stale.items(),
                                                                    key=lambda kv: -kv[1]))
             console.print(f"Cleared [bold]{cleared:,}[/bold] stale caption(s) ({which}) — "
-                          f"they'll be regenerated with {config.ai_vision_model}.")
+                          f"they'll be regenerated with {current_key}.")
         else:
-            console.print(f"No stale captions — everything already came from "
-                          f"{config.ai_vision_model}.")
+            console.print(f"No stale captions — everything already came from {current_key}.")
 
     # Validate before the library load, which takes a minute on a big library --
     # a typo shouldn't cost that wait.

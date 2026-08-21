@@ -25,12 +25,40 @@ from ..hardware import recommended_caption_workers
 from . import ollama_client
 from .ollama_client import AIError
 
+# Bump when CAPTION_PROMPT changes materially. It's part of the caption's
+# identity in the catalog, so raising it makes existing captions read as stale
+# (doctor reports them; `index --reindex-captions` refreshes) rather than a
+# prompt change silently leaving a library described two different ways.
+CAPTION_PROMPT_VERSION = 2
+
+# Written as prose on purpose. A structured header (KIND:/SUBTYPE:/SENSITIVE:)
+# was tried and measured on a 4B model: it put FaceTime under "app", called a
+# photo of three people a "screenshot", ignored the supplied vocabulary, and
+# flagged SENSITIVE on 3 of 4 harmless images. Prose is fuzzy-matched by the
+# embedding, so a wrong word costs a little relevance; a structured field gets
+# queried as fact, so a wrong value is a lie. Meanwhile 99% of real captions
+# already open with the image kind ("photo", "screenshot", "receipt"), so that
+# signal is available without asking for a schema.
+#
+# The explicit asks below come from measuring the previous prompt over 1,215
+# real captions: it mentioned a video call in 1% and a web page in 1.8%, which
+# is why FaceTime stills and web screenshots were indistinguishable in search.
 CAPTION_PROMPT = (
-    "Describe this photo in 1-2 short sentences for a search index. Mention the kind "
-    "of image (photo, screenshot, document, receipt, meme), the main subject, any "
-    "visible brand or product, and quote a few words of any prominent text. "
+    "Describe this image in 1-2 short sentences for a photo search index. "
+    "Begin with what kind of image it is: photo, screenshot, document, or receipt. "
+    "If it is a screenshot, say what it shows — a video call, a text message "
+    "conversation, a web page, a map, a receipt, a social media post, or an app. "
+    "Say whether people are visible and roughly how many. "
+    "Name any visible brand or product, and quote a few words of prominent text. "
     "No preamble, just the description."
 )
+
+
+def caption_key(config) -> str:
+    """The identity a caption is stored under: the vision model plus the prompt
+    version. Either changing means existing captions describe the library
+    differently from new ones, which the catalog needs to be able to see."""
+    return f"{config.ai_vision_model}+p{CAPTION_PROMPT_VERSION}"
 
 EMBED_BATCH = 16
 # How many photos to caption before pausing to embed them. Small enough that an
@@ -178,7 +206,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     # Model-scoped: a photo captioned by a DIFFERENT vision model counts as
     # un-captioned for the current one, so upgrading the model re-captions
     # instead of silently reusing stale text forever.
-    captioned = catalog.captioned_uuids(config.ai_vision_model)
+    captioned = catalog.captioned_uuids(caption_key(config))
 
     todo = [p for p in photos if p.uuid not in embedded or (captions and p.uuid not in captioned)]
     stats.already_indexed = len(photos) - len(todo)
@@ -223,7 +251,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
         pending = [p for p in chunk if p.uuid not in embedded or p.uuid in recaptioned]
         if not pending:
             return
-        docs = [build_document(p, catalog.get_caption(p.uuid, config.ai_vision_model))
+        docs = [build_document(p, catalog.get_caption(p.uuid, caption_key(config)))
                 for p in pending]
         vectors = ollama_client.embed(config.ollama_host, config.ai_embed_model, docs)
         for photo, vector in zip(pending, vectors):
@@ -262,7 +290,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
                             elif caption is None:
                                 stats.caption_skipped_no_image += 1
                             else:
-                                catalog.put_caption(photo.uuid, caption, config.ai_vision_model)
+                                catalog.put_caption(photo.uuid, caption, caption_key(config))
                                 fresh_captions.add(photo.uuid)
                                 stats.captioned += 1
             embed_chunk(chunk, recaptioned=fresh_captions)

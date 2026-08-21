@@ -89,6 +89,24 @@
   .score{position:absolute; top:8px; right:8px; z-index:2; background:var(--accent);
     color:var(--accent-tint); font-size:10.5px; border-radius:999px; padding:1px 7px;}
 
+  /* -- review sub-groups (server-clustered queues; review convenience only) -- */
+  /* Same trap as .bar/.gal-bar: .grid's display:grid outranks the UA's bare
+     [hidden] rule, so a folded group would stay on screen without this. */
+  .grid[hidden]{display:none;}
+  .subgroup{margin:0 0 1.3rem;}
+  .subgroup:last-child{margin-bottom:0;}
+  .subgroup-header{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+    border-bottom:1px dashed var(--line); padding-bottom:.35rem; margin-bottom:.7rem;}
+  .subgroup-title{font-size:13px; font-weight:500; margin:0; color:var(--ink-2);
+    overflow-wrap:anywhere;}
+  .subgroup-count{color:var(--ink-3); font-weight:400; white-space:nowrap;}
+  .subgroup-actions{display:flex; gap:10px; flex-shrink:0;}
+  .subgroup[data-folded="1"] .subgroup-header{border-bottom-style:solid; margin-bottom:0;}
+  .view-toggle{display:inline-flex; gap:8px; align-items:baseline; margin-right:4px;
+    padding-right:10px; border-right:1px solid var(--line);}
+  .link-btn[aria-pressed="true"]{color:var(--ink); font-weight:600; text-decoration:none;}
+  .link-btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px;}
+
   /* -- galleries (collapsed covers; click to expand members) -- */
   input[type=number]{width:5.2rem; font:inherit; font-size:14px; color:var(--ink);
     background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:.45rem .5rem;}
@@ -462,8 +480,18 @@ let currentSession = null;   // the session payload behind the grid in #review-r
 
 function noThumbTile() { return '<div class="no-thumb">no preview</div>'; }
 
+// Sub-groups: when a rule's queue is big and heterogeneous the server splits it
+// into labelled clusters so one decision can cover hundreds of photos. Grouping
+// is a review convenience only -- the checkboxes stay the source of truth and
+// the apply payload is unchanged.
+const foldedGroups = new Set();   // "<rule>\n<groupKey>" for groups folded away
+const flatRules = new Set();      // rules the user switched back to a flat grid
+let gridSeq = 0;                  // unique ids so fold buttons can aria-control
+
 function renderSession(payload) {
   currentSession = payload;
+  foldedGroups.clear();
+  flatRules.clear();
   $('apply-outcome').innerHTML = '';
   const root = $('review-root');
 
@@ -482,37 +510,11 @@ function renderSession(payload) {
   }
 
   for (const rule of rules) {
-    const cands = rule.candidates || [];
-    const errors = rule.errors || [];
     // Keep a rule visible with zero candidates when it has an error to explain
     // why (e.g. "no photos indexed yet") -- otherwise this silently reads as
     // "nothing to do" when the truth is "couldn't check".
-    if (!cands.length && !errors.length) continue;
-    const errorHtml = errors.map(e => '<p class="rule-error">' + esc(e) + '</p>').join('');
-    html += '<section class="rule-section" data-rule="' + esc(rule.name) + '">' +
-      '<div class="rule-header"><div>' +
-      '<h3>' + esc(rule.name) + '</h3>' +
-      '<p class="rule-meta">' + cands.length + ' matched · ' + esc(rule.action) + '</p>' +
-      errorHtml +
-      '</div><div class="rule-actions">' +
-      (cands.length ? (
-      '<button type="button" class="link-btn" data-action="select-all">select all</button>' +
-      '<button type="button" class="link-btn" data-action="select-none">select none</button>') : '') +
-      '</div></div><div class="grid">';
-    for (const c of cands) {
-      const thumb = c.thumb
-        ? '<img src="/thumb/' + encodeURIComponent(c.uuid) + '" alt="" loading="lazy">'
-        : noThumbTile();
-      html += '<label class="card">' +
-        '<input type="checkbox" class="pick" data-rule="' + esc(rule.name) + '" data-uuid="' +
-        esc(c.uuid) + '" checked>' +
-        '<div class="thumb">' + thumb + '</div>' +
-        '<p class="filename" title="' + esc(c.filename) + (c.date ? ' · ' + esc(c.date) : '') + '">' +
-        esc(c.filename) + '</p>' +
-        (c.detail ? '<p class="detail" title="' + esc(c.detail) + '">' + esc(c.detail) + '</p>' : '') +
-        '</label>';
-    }
-    html += '</div></section>';
+    if (!(rule.candidates || []).length && !(rule.errors || []).length) continue;
+    html += ruleSectionHtml(rule, null);
   }
   root.innerHTML = html;
   $('apply-status').textContent = '';
@@ -520,6 +522,159 @@ function renderSession(payload) {
   $('apply-bar').hidden = false;
   updateCount();
   root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Resolve a rule's declared subgroups against its candidate list. Every uuid
+// gets at most one card: a uuid named by two groups lands in the first, a uuid
+// named by no group falls into a trailing "not grouped" bucket, and a uuid the
+// server named but never listed as a candidate is dropped. That keeps the
+// checkbox count identical to the flat grid, so the apply bar can't drift.
+function ruleSubgroups(rule) {
+  const declared = Array.isArray(rule.subgroups) ? rule.subgroups : [];
+  if (!declared.length) return [];
+  const byUuid = new Map();
+  for (const c of rule.candidates || []) {
+    if (c && c.uuid != null && !byUuid.has(String(c.uuid))) byUuid.set(String(c.uuid), c);
+  }
+  const seen = new Set();
+  const groups = [];
+  declared.forEach((g, i) => {
+    const items = [];
+    for (const u of (g && g.uuids) || []) {
+      const uuid = String(u);
+      if (seen.has(uuid) || !byUuid.has(uuid)) continue;
+      seen.add(uuid);
+      items.push(byUuid.get(uuid));
+    }
+    if (!items.length) return;
+    const key = (g && g.key != null && g.key !== '') ? String(g.key) : ('group-' + i);
+    const label = (g && g.label) ? String(g.label) : key;
+    groups.push({ key, label, items });
+  });
+  if (!groups.length) return [];
+  const leftover = [];
+  for (const [uuid, c] of byUuid) {
+    if (!seen.has(uuid)) leftover.push(c);
+  }
+  if (leftover.length) groups.push({ key: '__ungrouped__', label: 'not grouped', items: leftover });
+  return groups;
+}
+
+function photoCount(n) { return n + ' photo' + (n === 1 ? '' : 's'); }
+
+// null map = fresh render (everything checked, as before); a map is a snapshot
+// taken before re-rendering one rule, so a view switch never loses a decision.
+function isPicked(map, uuid) { return !map || map.get(String(uuid)) !== false; }
+
+function candidateCardHtml(ruleName, c, picked) {
+  const thumb = c.thumb
+    ? '<img src="/thumb/' + encodeURIComponent(c.uuid) + '" alt="" loading="lazy">'
+    : noThumbTile();
+  return '<label class="card">' +
+    '<input type="checkbox" class="pick" data-rule="' + esc(ruleName) + '" data-uuid="' +
+    esc(c.uuid) + '"' + (picked ? ' checked' : '') + '>' +
+    '<div class="thumb">' + thumb + '</div>' +
+    '<p class="filename" title="' + esc(c.filename) + (c.date ? ' · ' + esc(c.date) : '') + '">' +
+    esc(c.filename) + '</p>' +
+    (c.detail ? '<p class="detail" title="' + esc(c.detail) + '">' + esc(c.detail) + '</p>' : '') +
+    '</label>';
+}
+
+function gridHtml(ruleName, items, checkedMap, attrs) {
+  return '<div class="grid"' + (attrs || '') + '>' +
+    items.map(c => candidateCardHtml(ruleName, c, isPicked(checkedMap, c.uuid))).join('') +
+    '</div>';
+}
+
+function subgroupHtml(rule, group, checkedMap) {
+  const foldKey = rule.name + '\n' + group.key;
+  const folded = foldedGroups.has(foldKey);
+  const gridId = 'rg-' + (++gridSeq);
+  return '<section class="subgroup" data-folded="' + (folded ? '1' : '0') +
+    '" data-fold-key="' + esc(foldKey) + '">' +
+    '<div class="subgroup-header">' +
+    '<h4 class="subgroup-title">' + esc(group.label) +
+    ' <span class="subgroup-count">— ' + photoCount(group.items.length) + '</span></h4>' +
+    '<div class="subgroup-actions">' +
+    '<button type="button" class="link-btn" data-action="group-select-all">select all</button>' +
+    '<button type="button" class="link-btn" data-action="group-select-none">select none</button>' +
+    '<button type="button" class="link-btn" data-action="group-fold" aria-controls="' + gridId +
+    '" aria-expanded="' + (folded ? 'false' : 'true') + '">' +
+    (folded ? 'show group' : 'hide group') + '</button>' +
+    '</div></div>' +
+    gridHtml(rule.name, group.items, checkedMap, ' id="' + gridId + '"' + (folded ? ' hidden' : '')) +
+    '</section>';
+}
+
+function ruleSectionHtml(rule, checkedMap) {
+  const cands = rule.candidates || [];
+  const errors = rule.errors || [];
+  const groups = ruleSubgroups(rule);
+  const grouped = groups.length > 0 && !flatRules.has(rule.name);
+
+  let meta = cands.length + ' matched';
+  if (grouped) meta += ' · ' + groups.length + ' group' + (groups.length === 1 ? '' : 's');
+  meta += ' · ' + esc(rule.action);
+
+  const viewToggle = groups.length
+    ? '<span class="view-toggle" role="group" aria-label="Review layout for ' + esc(rule.name) + '">' +
+      '<button type="button" class="link-btn" data-action="rule-view" data-view="grouped" aria-pressed="' +
+      (grouped ? 'true' : 'false') + '">Grouped</button>' +
+      '<button type="button" class="link-btn" data-action="rule-view" data-view="flat" aria-pressed="' +
+      (grouped ? 'false' : 'true') + '">Flat</button></span>'
+    : '';
+  const bulk = cands.length
+    ? '<button type="button" class="link-btn" data-action="select-all">select all</button>' +
+      '<button type="button" class="link-btn" data-action="select-none">select none</button>'
+    : '';
+
+  const body = grouped
+    ? groups.map(g => subgroupHtml(rule, g, checkedMap)).join('')
+    : gridHtml(rule.name, cands, checkedMap, '');
+
+  return '<section class="rule-section" data-rule="' + esc(rule.name) + '">' +
+    '<div class="rule-header"><div>' +
+    '<h3>' + esc(rule.name) + '</h3>' +
+    '<p class="rule-meta">' + meta + '</p>' +
+    errors.map(e => '<p class="rule-error">' + esc(e) + '</p>').join('') +
+    '</div><div class="rule-actions">' + viewToggle + bulk + '</div></div>' +
+    body + '</section>';
+}
+
+function ruleSectionFor(name) {
+  return Array.from($('review-root').querySelectorAll('.rule-section'))
+    .find(sec => sec.dataset.rule === name) || null;
+}
+
+// Folding is purely visual: the cards stay in the DOM (just hidden) so their
+// checkbox state -- and the apply count -- are untouched.
+function toggleGroupFold(group, btn) {
+  const folded = group.dataset.folded !== '1';
+  group.dataset.folded = folded ? '1' : '0';
+  const grid = group.querySelector('.grid');
+  if (grid) grid.hidden = folded;
+  btn.textContent = folded ? 'show group' : 'hide group';
+  btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  const key = group.dataset.foldKey;
+  if (key) { if (folded) foldedGroups.add(key); else foldedGroups.delete(key); }
+}
+
+// Re-render one rule in the other layout, carrying every checkbox across.
+function setRuleView(name, view) {
+  if (!currentSession) return;
+  const rule = (currentSession.rules || []).find(r => r.name === name);
+  const section = ruleSectionFor(name);
+  if (!rule || !section) return;
+  if (view === 'flat') flatRules.add(name); else flatRules.delete(name);
+  const checkedMap = new Map();
+  section.querySelectorAll('.pick').forEach(cb => { checkedMap.set(String(cb.dataset.uuid), cb.checked); });
+  section.outerHTML = ruleSectionHtml(rule, checkedMap);
+  updateCount();
+  const fresh = ruleSectionFor(name);
+  if (fresh) {
+    const btn = fresh.querySelector('[data-action="rule-view"][data-view="' + view + '"]');
+    if (btn) btn.focus();
+  }
 }
 
 function updateCount() {
@@ -532,7 +687,28 @@ $('review-root').addEventListener('change', e => {
 $('review-root').addEventListener('click', e => {
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
-  const checked = btn.dataset.action === 'select-all';
+  const action = btn.dataset.action;
+
+  if (action === 'group-select-all' || action === 'group-select-none') {
+    const group = btn.closest('.subgroup');
+    if (!group) return;
+    const checked = action === 'group-select-all';
+    group.querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
+    updateCount();
+    return;
+  }
+  if (action === 'group-fold') {
+    const group = btn.closest('.subgroup');
+    if (group) toggleGroupFold(group, btn);
+    return;
+  }
+  if (action === 'rule-view') {
+    const section = btn.closest('.rule-section');
+    if (section) setRuleView(section.dataset.rule, btn.dataset.view);
+    return;
+  }
+  // Rule-level bulk select still reaches every card, grouped or flat.
+  const checked = action === 'select-all';
   btn.closest('.rule-section').querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
   updateCount();
 });

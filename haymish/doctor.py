@@ -139,7 +139,12 @@ def check_index_freshness(config) -> tuple[bool, str, str]:
     those photos (it's model-scoped) but `find`/`ask` still read the old text."""
     from .catalog import Catalog
 
-    current = config.ai_vision_model
+    # Must match how captions are actually stored: model + prompt version. A
+    # prompt change makes old captions describe the library differently, which
+    # is exactly the kind of drift this check exists to surface.
+    from .ai.indexer import caption_key
+
+    current = caption_key(config)
     try:
         catalog = Catalog()
     except Exception as e:
