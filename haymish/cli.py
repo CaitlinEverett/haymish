@@ -505,7 +505,12 @@ def review(rule, no_open):
 @click.option("--reindex-captions", "reindex_captions", is_flag=True,
               help="Drop captions written by any other vision model first, so they're "
                    "regenerated with the model currently configured in rules.toml.")
-def index(no_captions, limit, concurrency, reindex_captions):
+@click.option("--rule", "rule_name", default=None, metavar="NAME",
+              help="Only index photos matching this rule's query filters — e.g. "
+                   "`--rule screenshots-general` captions just your screenshots. "
+                   "Captioning a whole library takes many hours; this targets the "
+                   "photos you actually need described.")
+def index(no_captions, limit, concurrency, reindex_captions, rule_name):
     """Build the AI index: a caption + embedding per photo, cached locally.
 
     Powers `haymish find`, `haymish ask`, and `semantic = {…}` rules. Incremental —
@@ -533,6 +538,14 @@ def index(no_captions, limit, concurrency, reindex_captions):
             console.print(f"No stale captions — everything already came from "
                           f"{config.ai_vision_model}.")
 
+    # Validate before the library load, which takes a minute on a big library --
+    # a typo shouldn't cost that wait.
+    if rule_name and rule_name not in {r.name for r in config.rules}:
+        console.print(f"[red]Unknown rule:[/red] {rule_name!r}. "
+                      f"Known: {sorted(r.name for r in config.rules)}")
+        catalog.close()
+        sys.exit(1)
+
     hw = hardware.detect()
     if no_captions:
         console.print(f"{hw.describe()} — captions disabled (OCR text and labels only)")
@@ -545,6 +558,25 @@ def index(no_captions, limit, concurrency, reindex_captions):
         # Videos included: they're captioned/embedded from their poster frame,
         # so find/ask/semantic rules work on them too.
         photos = all_photos(photosdb)
+
+    if rule_name:
+        import datetime as _dt
+
+        from .library import matches_query
+
+        rule = config.rule(rule_name)   # name already validated above
+        now = _dt.datetime.now(_dt.timezone.utc)
+        before = len(photos)
+        # Query filters only -- deliberately not the semantic or classify stages.
+        # Those need the index this command is building, so applying them here
+        # would be circular.
+        photos = [p for p in photos if matches_query(p, rule.query, now)]
+        console.print(f"Limited to [bold]{len(photos):,}[/bold] of {before:,} photos "
+                      f"matching [bold]{rule_name}[/bold]'s query filters.")
+        if not photos:
+            console.print("[yellow]Nothing matches that rule's query — nothing to index.[/yellow]")
+            catalog.close()
+            return
 
     from rich.progress import Progress
 

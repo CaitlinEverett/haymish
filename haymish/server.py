@@ -159,7 +159,34 @@ def _rule_action_label(rule: Rule) -> str:
     return " · ".join(parts) or "report only"
 
 
+def _subgroups_for(state: "ServeState", previews) -> dict[str, list[dict]]:
+    """rule name -> labelled sub-groups, for rules matching enough photos that a
+    flat grid stops being reviewable. Best-effort: any failure just means the
+    UI falls back to the flat list, which still works."""
+    from .subgroup import subgroup_photos
+
+    out: dict[str, list[dict]] = {}
+    catalog = Catalog()
+    try:
+        for rp in previews:
+            if len(rp.candidates) < 24:      # small queues read fine flat
+                continue
+            try:
+                groups = subgroup_photos(state.config, catalog, rp.candidates)
+            except Exception:
+                continue
+            if len(groups) > 1:
+                out[rp.rule.name] = [
+                    {"key": g.key, "label": g.label, "size": g.size, "uuids": g.uuids}
+                    for g in groups
+                ]
+    finally:
+        catalog.close()
+    return out
+
+
 def _session_payload(session_id: str, session: dict) -> dict:
+    subgroups = session.get("subgroups") or {}
     return {
         "session": session_id,
         "plan": session.get("plan"),
@@ -168,6 +195,12 @@ def _session_payload(session_id: str, session: dict) -> dict:
                 "name": rp.rule.name,
                 "action": _rule_action_label(rp.rule),
                 "errors": rp.errors,
+                # Present only for big, heterogeneous queues. A screenshots rule
+                # can match thousands of unrelated things -- FaceTime stills, web
+                # pages, receipts, photos of people -- and no single answer to
+                # "apply this?" is right for all of them. Groups let one decision
+                # cover hundreds.
+                "subgroups": subgroups.get(rp.rule.name, []),
                 "candidates": [
                     {"uuid": pc.uuid, "filename": pc.filename, "date": pc.date,
                      "detail": pc.classify_detail,
@@ -202,7 +235,12 @@ def _build_previews_session(state: ServeState, job: Job, rules_override=None,
                 job.progress = {"phase": "thumbnails", "done": done, "total": total}
     finally:
         catalog.close()
+
+    job.progress = {"phase": "grouping"}
+    subgroups = _subgroups_for(state, previews)
+
     session_id = state.put_session(previews, plan=plan)
+    state.sessions[session_id]["subgroups"] = subgroups
     return _session_payload(session_id, state.sessions[session_id])
 
 
