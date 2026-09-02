@@ -60,6 +60,13 @@ def caption_key(config) -> str:
     differently from new ones, which the catalog needs to be able to see."""
     return f"{config.ai_vision_model}+p{CAPTION_PROMPT_VERSION}"
 
+# An unattended overnight run must not grind through a whole library failing.
+# If the vision backend dies or hangs, every remaining caption raises, and
+# without this the run would "finish" hours later having captioned nothing --
+# the worst possible outcome, since it looks like work happened. Successes reset
+# the count, so ordinary intermittent failures never trip it.
+CONSECUTIVE_FAILURE_LIMIT = 25
+
 EMBED_BATCH = 16
 # How many photos to caption before pausing to embed them. Small enough that an
 # interrupted multi-hour run loses little, big enough that embedding overhead
@@ -270,6 +277,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     log.start(total, workers, captions)
     started = time.monotonic()
     done = 0
+    consecutive_failures = 0
     try:
         for start in range(0, len(todo), CHUNK):
             chunk = todo[start:start + CHUNK]
@@ -284,6 +292,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
                         for photo, caption, error in pool.map(caption_one, needs_caption):
                             if error is not None:
                                 stats.caption_failed += 1
+                                consecutive_failures += 1
                                 log.failure(photo.uuid, error)
                                 if len(stats.errors) < 5:
                                     stats.errors.append(f"caption failed for {photo.uuid}: {error}")
@@ -293,6 +302,21 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
                                 catalog.put_caption(photo.uuid, caption, caption_key(config))
                                 fresh_captions.add(photo.uuid)
                                 stats.captioned += 1
+                                consecutive_failures = 0
+
+                    if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
+                        # Everything captioned so far is already committed, so
+                        # stopping here loses nothing and re-running resumes.
+                        embed_chunk(chunk, recaptioned=fresh_captions)
+                        message = (
+                            f"stopped after {consecutive_failures} consecutive caption "
+                            f"failures — the vision backend looks down. Check `ollama ps` "
+                            f"and that {config.ai_vision_model} is pulled, then re-run "
+                            f"`haymish index` to pick up where this left off "
+                            f"({stats.captioned:,} captioned before stopping)."
+                        )
+                        log.aborted(message)
+                        raise AIError(message)
             embed_chunk(chunk, recaptioned=fresh_captions)
             done += len(chunk)
             if progress:
