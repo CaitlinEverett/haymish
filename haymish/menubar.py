@@ -115,6 +115,9 @@ class HaymishMenuBarApp(rumps.App):
         self.status_item = rumps.MenuItem("Loading status…")
         self.status_item.set_callback(None)
         self.confirm_deletes_item = rumps.MenuItem("Confirm Deletes (0)")
+        # Bind by MenuItem reference — @rumps.clicked("Confirm Deletes (0)") breaks
+        # as soon as refresh_staged_deletes_count changes the title to (N).
+        self.confirm_deletes_item.set_callback(self.confirm_deletes)
 
         self.menu = [
             self.status_item,
@@ -123,6 +126,7 @@ class HaymishMenuBarApp(rumps.App):
             "Review Now",
             "Sweep Now (no review)",
             self.confirm_deletes_item,
+            "Index catch-up (captions)",
             "Open Last Report",
             None,
         ]
@@ -143,18 +147,22 @@ class HaymishMenuBarApp(rumps.App):
     def _on_staged_deletes_timer(self, _timer):
         self.refresh_staged_deletes_count()
 
-    @rumps.clicked("Open Haymish")
-    def open_haymish(self, sender):
-        # `haymish app` handles daemon startup + browser open; run detached so a
-        # slow first library load never blocks the menu bar's run loop.
-        subprocess.Popen(["haymish", "app"], stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL, start_new_session=True)
+    def _uv_haymish(self, *args: str) -> list[str]:
+        return ["uv", "run", "haymish", *args]
 
-    @rumps.clicked("Review Now")
-    def review_now(self, _sender):
-        """Opens the thumbnail review UI in a Terminal window so you can confirm
-        before anything is applied — the safe day-to-day dogfood path."""
-        shell_cmd = escape_applescript_string(f"cd {PROJECT_DIR} && uv run haymish review")
+    def _popen_uv(self, *args: str) -> None:
+        subprocess.Popen(
+            self._uv_haymish(*args),
+            cwd=PROJECT_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def _terminal_uv(self, *args: str) -> None:
+        shell_cmd = escape_applescript_string(
+            f"cd {PROJECT_DIR} && uv run haymish {' '.join(args)}"
+        )
         script = (
             'tell application "Terminal"\n'
             "  activate\n"
@@ -162,6 +170,16 @@ class HaymishMenuBarApp(rumps.App):
             "end tell"
         )
         subprocess.run(["osascript", "-e", script])
+
+    @rumps.clicked("Open Haymish")
+    def open_haymish(self, sender):
+        # Dashboard is the primary surface; detached so library load never blocks rumps.
+        self._popen_uv("app")
+
+    @rumps.clicked("Review Now")
+    def review_now(self, _sender):
+        """Open the dashboard (same path as Open Haymish) — subgroups, jobs, confirm."""
+        self._popen_uv("app")
 
     @rumps.clicked("Sweep Now (no review)")
     def sweep_now(self, sender):
@@ -178,7 +196,7 @@ class HaymishMenuBarApp(rumps.App):
 
         try:
             proc = subprocess.run(
-                ["uv", "run", "haymish", "sweep", "--apply"],
+                self._uv_haymish("sweep", "--apply"),
                 cwd=PROJECT_DIR,
                 capture_output=True,
                 text=True,
@@ -199,16 +217,12 @@ class HaymishMenuBarApp(rumps.App):
             sender.set_callback(self.sweep_now)
             self.refresh_status()
 
-    @rumps.clicked("Confirm Deletes (0)")
     def confirm_deletes(self, sender):
-        shell_cmd = escape_applescript_string(f"cd {PROJECT_DIR} && uv run haymish confirm-deletes")
-        script = (
-            'tell application "Terminal"\n'
-            "  activate\n"
-            f'  do script "{shell_cmd}"\n'
-            "end tell"
-        )
-        subprocess.run(["osascript", "-e", script])
+        self._terminal_uv("confirm-deletes")
+
+    @rumps.clicked("Index catch-up (captions)")
+    def index_catch_up(self, _sender):
+        self._terminal_uv("index", "--catch-up-captions")
 
     @rumps.clicked("Open Last Report")
     def open_last_report(self, sender):

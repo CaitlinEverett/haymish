@@ -15,6 +15,13 @@ from .paths import RULES_PATH, ensure_app_dirs
 
 console = Console()
 
+# Final deletion stays structurally unavailable until archive records cover and
+# independently re-verify every asset component (original, Live Photo motion,
+# associated RAW, and video as applicable). Legacy single-file rows are not
+# deletion-grade proof. Flip this only as part of the manifest implementation and
+# its isolated safety tests, never as an operational escape hatch.
+_COMPLETE_ARCHIVE_MANIFESTS_SUPPORTED = False
+
 
 def _load_config():
     from .config import ConfigError, load_config
@@ -124,6 +131,15 @@ def _print_sweep_report(report, apply_: bool) -> None:
     for o in report.outcomes:
         for err in o.action_errors:
             console.print(f"  [red]{o.rule}:[/red] {err}")
+    if not apply_:
+        would_hide = sum(o.hidden for o in report.outcomes)
+        skipped_icloud = sum(o.hide_skipped_icloud for o in report.outcomes)
+        if would_hide or skipped_icloud:
+            console.print(
+                f"\n[bold]Hide (dry-run):[/bold] {would_hide} would hide locally"
+                + (f"; {skipped_icloud} skipped (iCloud)" if skipped_icloud else "")
+                + "."
+            )
     total_staged = sum(o.staged_deletes for o in report.outcomes)
     if total_staged and apply_:
         console.print(
@@ -786,17 +802,15 @@ def ask(request, save_name, no_open):
 
 
 @main.command("confirm-deletes")
-@click.option("--no-backup-i-understand", "skip_backup_check", is_flag=True,
-              help="Proceed even for photos with no verified backup copy. Not recommended — "
-                   "deletion beyond Photos' 30-day Recently Deleted window becomes permanent.")
-def confirm_deletes(skip_backup_check):
+def confirm_deletes():
     """Review and confirm staged deletions.
 
     This is the only command that can actually delete a photo, and even here the
     macOS system confirmation dialog is the final gate — it cannot be scripted past.
-    Deletion always requires a verified backup copy first (run `haymish archive`),
-    unless explicitly overridden, and always requires typing a confirmation phrase
-    naming the exact count of photos about to be deleted.
+    Deletion requires a complete, independently re-verified asset-component
+    manifest, a typed confirmation naming the exact asset count, and the macOS
+    dialog. Finalization currently fails closed until complete manifest support
+    replaces the legacy single-file archive ledger. There is no backup bypass.
     """
     from .actions import delete as delete_action
     from .actions.export import reverify_on_disk
@@ -811,6 +825,16 @@ def confirm_deletes(skip_backup_check):
         console.print("Nothing staged for deletion.")
         catalog.close()
         return
+
+    if not _COMPLETE_ARCHIVE_MANIFESTS_SUPPORTED:
+        console.print(
+            "[red]Final deletion is temporarily disabled.[/red] Haymish's legacy "
+            "archive ledger records only one exported file per asset; it cannot yet "
+            "prove complete coverage for Live Photo and RAW companions. Staged "
+            "candidates remain staged and nothing was deleted."
+        )
+        catalog.close()
+        sys.exit(1)
 
     with console.status("Loading Photos library to resolve filenames…"):
         photosdb = load_photosdb(config.library)
@@ -841,11 +865,10 @@ def confirm_deletes(skip_backup_check):
                           "✓" if verified else "[red]MISSING[/red]")
     console.print(table)
 
-    if missing_backup and not skip_backup_check:
+    if missing_backup:
         console.print(
-            f"\n[red]{len(missing_backup)} photo(s) have no verified backup copy.[/red] "
-            f"Run [bold]haymish archive[/bold] first, or pass --no-backup-i-understand "
-            f"to proceed anyway (not recommended)."
+            f"\n[red]{len(missing_backup)} photo(s) have no verified backup coverage.[/red] "
+            f"Run [bold]haymish archive[/bold] first. Deletion has no backup bypass."
         )
         catalog.close()
         sys.exit(1)
@@ -891,6 +914,53 @@ def confirm_deletes(skip_backup_check):
     catalog.close()
 
 
+@main.command("recover-hidden")
+@click.argument("uuids", nargs=-1)
+@click.option("--run-id", default=None, help="Unhide every hide action logged for this run.")
+def recover_hidden_cmd(uuids, run_id):
+    """Unhide photos from the catalog hide ledger (PhotoKit).
+
+    Pass one or more UUIDs and/or --run-id. Example UUID from hide testing:
+    4BD24541-9964-40BF-9D0B-637E1775B3DD
+
+    Run from Terminal if Cursor lacks Photos access — see `haymish doctor`.
+    """
+    from .catalog import Catalog
+    from .recover_hidden import recover_hidden
+
+    if not uuids and not run_id:
+        console.print(
+            "[red]Need at least one UUID or --run-id.[/red] "
+            "Example: [bold]haymish recover-hidden --run-id abc123[/bold] or "
+            "[bold]haymish recover-hidden 4BD24541-9964-40BF-9D0B-637E1775B3DD[/bold]"
+        )
+        sys.exit(1)
+
+    catalog = Catalog()
+    report = recover_hidden(
+        catalog,
+        run_id=run_id,
+        uuids=list(uuids) if uuids else None,
+    )
+    catalog.close()
+
+    for err in report.errors:
+        console.print(f"[red]{err}[/red]")
+    if not report.uuids:
+        sys.exit(1)
+
+    console.print(
+        f"Unhid [bold]{report.ok}[/bold] of {len(report.uuids)} photo(s)"
+        + (f"; {len(report.failed)} failed" if report.failed else "")
+        + "."
+    )
+    for uuid, status in report.failed:
+        console.print(f"  [yellow]{uuid}:[/yellow] {status}")
+    if report.errors and report.ok == 0:
+        sys.exit(2)
+    sys.exit(0 if report.ok == len(report.uuids) else 2)
+
+
 @main.command()
 @click.option("--run-id", default=None, help="Undo a specific run instead of the most recent.")
 def undo(run_id):
@@ -931,12 +1001,11 @@ def undo(run_id):
 
 @main.command()
 def archive():
-    """Export checksum-verified backup copies for every photo staged for deletion.
+    """Export and integrity-track one file for every staged asset.
 
-    Rules with an archive stage already get backed up during `sweep --apply` once
-    they age past archive.after_days; this command guarantees backup coverage right
-    now for whatever is currently staged, independent of that timing — run it before
-    `haymish confirm-deletes`.
+    This legacy command does not yet build complete Live Photo/RAW manifests and
+    therefore cannot authorize final deletion. It remains useful for making an
+    additional copy while manifest support is implemented.
     """
     from .actions import delete as delete_action, export as export_action
     from .catalog import Catalog

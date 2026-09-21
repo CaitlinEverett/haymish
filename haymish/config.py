@@ -248,7 +248,7 @@ def pack_metadata(path: Path) -> dict:
     return meta
 
 
-def load_config(path: Path | None = None) -> Config:
+def load_config(path: Path | None = None, *, packs_dir: Path | None = None) -> Config:
     path = path or RULES_PATH
     if not path.exists():
         raise ConfigError(
@@ -276,7 +276,7 @@ def load_config(path: Path | None = None) -> Config:
         )
 
     rules = [_parse_rule(name, body) for name, body in raw.get("rule", {}).items()]
-    rules += _load_packs()
+    rules += _load_packs(packs_dir)
 
     names = {r.name for r in rules}
     seen: set[str] = set()
@@ -308,8 +308,9 @@ def load_config(path: Path | None = None) -> Config:
             )
         if r.delete and not r.archive:
             raise ConfigError(
-                f"[rule.{r.name}] has a delete stage but no archive stage — deletion requires "
-                f"a verified backup copy. Add archive = {{ after_days = N }} (N < delete.after_days)."
+                f"[rule.{r.name}] has a delete stage but no archive stage — cleanup policy "
+                f"requires an earlier archive stage. Add archive = {{ after_days = N }} "
+                f"(N < delete.after_days); finalization separately requires a complete manifest."
             )
         if r.delete and r.archive and r.archive.after_days >= r.delete.after_days:
             raise ConfigError(

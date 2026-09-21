@@ -42,9 +42,11 @@ def _ensure_authorized() -> None:
 
     status = _wait_for_auth()
     if status != Photos.PHAuthorizationStatusAuthorized:
+        from ..doctor import photokit_access_fix_hint
+
         raise Exception(
-            f"PhotoKit access not authorized (status={status}); grant Full Access to "
-            "Photos for this app in System Settings > Privacy & Security > Photos"
+            f"PhotoKit access not authorized (status={status}); "
+            f"grant Full Access — {photokit_access_fix_hint()}"
         )
 
 

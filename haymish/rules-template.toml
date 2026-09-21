@@ -2,18 +2,17 @@
 # ================
 # Lives at ~/.haymish/rules.toml (run `haymish init` to install this template).
 #
-# Each [rule.<name>] declares a query, an optional classifier, and a lifecycle ladder.
-# All lifecycle stages are optional and age-gated by the PHOTO'S OWN DATE (not when
-# it was first matched), so behavior is predictable: "screenshots older than 14 days
-# get hidden," full stop.
+# Each [rule.<name>] declares a query, an optional classifier, and a disposition.
+# The starter rules only add albums/keywords: a new install must earn trust before
+# it changes visibility or stages cleanup. Optional lifecycle stages are age-gated
+# by the PHOTO'S OWN DATE (not when it was first matched).
 #
 #   file    = { album = "...", keyword = "..." }  # immediate: filed, still visible
 #   hide    = { after_days = N }                  # off the camera roll (Photos Hidden album)
-#   archive = { after_days = N }                  # original exported to [global].backup, checksum-verified
-#   delete  = { after_days = N }                  # STAGED ONLY — nothing is deleted until you run
-#                                                 # `haymish confirm-deletes` and approve the
-#                                                 # macOS system dialog. Deletion requires a
-#                                                 # verified archive copy unless you override.
+#   archive = { after_days = N }                  # export to [global].backup (manifest work in progress)
+#   delete  = { after_days = N }                  # STAGED ONLY — final deletion currently fails
+#                                                 # closed until complete asset-component manifests
+#                                                 # exist; it will also require typed + macOS approval.
 #
 # Rules run in file order. `exclude_matched_by` keeps a photo claimed by an earlier
 # rule from being re-processed by a later one.
@@ -39,16 +38,12 @@ planner_model = "qwen3.6:27b"         # turns `haymish ask "..."` into a rule
 # planner_backend = "claude"          # opt-in: use the Claude API for planning instead
 
 # ---------------------------------------------------------------------------
-# 1. Ad/product screenshots — the core roll-clutter fix. Screenshots stay
-#    findable in an album for easy sharing, leave the roll after 2 weeks,
-#    and lifecycle out after 3 months.
+# 1. Ad/product screenshots — the core roll-clutter candidate. The starter
+#    posture only annotates and adds an album view; visibility remains unchanged.
 [rule.ad-screenshots]
 query = { screenshot = true }
 classify = { backend = "ollama", prompt = "Is this a screenshot of a product advertisement, shopping page, listing, or item for sale? Answer only yes or no.", threshold = 0.7 }
 file = { album = "Swept/Ads & Products", keyword = "swept:ad" }
-hide = { after_days = 14 }
-archive = { after_days = 60 }
-delete = { after_days = 90 }
 
 # 2. Receipts — heuristics on Apple's labels + indexed OCR text. Runs BEFORE
 #    screenshots-general so its exclude_matched_by actually has something to exclude
@@ -64,18 +59,16 @@ query = { screenshot = true }
 detector = "messages"
 file = { album = "Swept/Messages", keyword = "swept:message" }
 
-# 4. All other screenshots — filed immediately, hidden after a month.
+# 4. All other screenshots — annotated and added to an album view.
 [rule.screenshots-general]
 query = { screenshot = true }
 exclude_matched_by = ["ad-screenshots", "receipts", "message-screenshots"]
 file = { album = "Swept/Screenshots", keyword = "swept:screenshot" }
-hide = { after_days = 30 }
 
-# 5. Selfies — filed and hidden immediately; the album keeps them reachable.
+# 5. Selfies — an optional album view; nothing is hidden by default.
 [rule.selfies]
 query = { selfie = true }
 file = { album = "Swept/Selfies" }
-hide = { after_days = 0 }
 
 # 6. Duplicates — keeps the best copy (resolution, then aesthetic score),
 #    stages the rest. Report-reviewed before any delete, like everything else.
@@ -89,13 +82,12 @@ file = { album = "Swept/Duplicates" }
 detector = "junk"
 report_only = true
 
-# 8. Screen recordings — filed and off the roll after 2 weeks. Videos work in
-#    rules via `movie` / `screen_recording` query flags; the AI index covers
-#    them too (captioned from their poster frame).
+# 8. Screen recordings — added to an album view. Videos work in rules via
+#    `movie` / `screen_recording` query flags; the AI index covers them too
+#    (captioned from their poster frame).
 [rule.screen-recordings]
 query = { screen_recording = true }
 file = { album = "Swept/Screen Recordings" }
-hide = { after_days = 14 }
 
 # ---------------------------------------------------------------------------
 # QUERY REFERENCE — every filter below reads metadata Photos already has, so

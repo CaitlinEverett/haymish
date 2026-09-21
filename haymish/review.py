@@ -60,6 +60,15 @@ def ensure_thumbnail(photo) -> Path | None:
     return dest
 
 
+def _hide_banner(meta) -> str:
+    if meta is None or meta.due == 0:
+        return ""
+    parts = [f"{meta.hideable} of {meta.due} hideable"]
+    if meta.skipped_icloud:
+        parts.append(f"{meta.skipped_icloud} iCloud-skipped")
+    return " · ".join(parts)
+
+
 def _rule_label(rule) -> str:
     parts = []
     if rule.hide:
@@ -97,12 +106,18 @@ def _render_page(previews: list[RulePreview]) -> str:
         error_html = "".join(
             f'<p class="rule-error">{htmllib.escape(e)}</p>' for e in rp.errors
         )
+        hide_banner = _hide_banner(rp.hide_preview)
+        hide_html = (
+            f'<p class="hide-banner">{htmllib.escape(hide_banner)}</p>'
+            if hide_banner else ""
+        )
         sections.append(f"""
         <section class="rule-section" data-rule="{htmllib.escape(rp.rule.name)}">
           <div class="rule-header">
             <div>
               <h2>{htmllib.escape(rp.rule.name)}</h2>
               <p class="rule-meta">{len(rp.preview_candidates)} matched · {htmllib.escape(_rule_label(rp.rule))}</p>
+              {hide_html}
               {error_html}
             </div>
             <div class="rule-actions">
@@ -134,6 +149,7 @@ def _render_page(previews: list[RulePreview]) -> str:
     border-bottom:1px solid var(--line); padding-bottom:.5rem; margin-bottom:1rem;}}
   h2{{font-size:16px; font-weight:500; margin:0; text-transform:none;}}
   .rule-meta{{font-size:12.5px; color:var(--ink-3); margin:2px 0 0;}}
+  .hide-banner{{font-size:12.5px; color:var(--accent); margin:4px 0 0; font-weight:500;}}
   .rule-error{{font-size:12.5px; color:#b0492e; margin:4px 0 0;}}
   @media (prefers-color-scheme: dark){{ .rule-error{{color:#e08468;}} }}
   .rule-actions{{display:flex; gap:10px;}}

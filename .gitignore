@@ -4,3 +4,7 @@ __pycache__/
 dist/
 .DS_Store
 .pytest_cache/
+.dirac-cache/
+.aider.tags.cache.*
+.aider.chat.history.md
+.aider.input.history

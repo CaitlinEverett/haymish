@@ -1,4 +1,4 @@
-"""Export a photo's original to the backup volume and checksum-verify the write.
+"""Export one asset file to the backup volume and integrity-track the output.
 
 osxphotos 0.76.1 exposes this as PhotoInfo.export (not export2 -- that name doesn't
 exist in this version). Signature introspected from the installed package:
@@ -118,9 +118,11 @@ def is_up_to_date(photo, backup_dir: Path) -> bool:
 
 
 def archive_photo(photo, backup_dir: Path) -> ArchiveResult:
-    """Exports photo's original to backup_dir/YYYY/MM/<filename>, sha256-verifies the
-    write, and returns the result. Does not touch the Catalog -- the caller records
-    ArchiveResult's fields via Catalog.record_archive.
+    """Export one file, hash the output, and return its legacy archive record.
+
+    This is not a complete asset manifest: Live Photo and associated RAW components
+    are not requested or recorded here. It cannot authorize final deletion. The
+    caller records the result through ``Catalog.record_archive``.
     """
     uuid = getattr(photo, "uuid", "?")
     dest_dir = _dest_dir(photo, backup_dir)

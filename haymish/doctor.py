@@ -16,10 +16,18 @@ import httpx
 VISION_MODEL_MARKERS = ("gemma3", "qwen2.5vl", "qwen3-vl", "llava", "llama3.2-vision", "minicpm-v", "moondream")
 
 
-def _host_app_hint() -> str:
+def host_app_hint() -> str:
+    """Human label for the host that launched haymish (for TCC settings paths)."""
     term = os.environ.get("TERM_PROGRAM", "")
     hints = {"Apple_Terminal": "Terminal", "iTerm.app": "iTerm", "vscode": "Cursor / VS Code"}
     return hints.get(term, "the app you run haymish from (Terminal / iTerm / Cursor)")
+
+
+def photokit_access_fix_hint() -> str:
+    return (
+        f"System Settings → Privacy & Security → Photos → allow Full Access for "
+        f"{host_app_hint()}"
+    )
 
 
 def check_macos() -> tuple[bool, str, str]:
@@ -45,7 +53,7 @@ def check_full_disk_access(library: Path) -> tuple[bool, str, str]:
     except PermissionError:
         return False, "Full Disk Access", (
             f"blocked. Fix: System Settings → Privacy & Security → Full Disk Access → "
-            f"enable {_host_app_hint()}, then restart it."
+            f"enable {host_app_hint()}, then restart it."
         )
 
 
@@ -75,7 +83,7 @@ def check_photokit_auth() -> tuple[bool, str, str]:
         if status == 0:
             return True, "PhotoKit access (hide/delete)", "not requested yet — first hide/delete will prompt"
         return False, "PhotoKit access (hide/delete)", (
-            f"{label}. Fix: System Settings → Privacy & Security → Photos → allow {_host_app_hint()}"
+            f"{label}. Fix: {photokit_access_fix_hint()}"
         )
     except Exception as e:
         return False, "PhotoKit access (hide/delete)", f"pyobjc Photos framework unavailable: {e}"

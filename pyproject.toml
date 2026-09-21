@@ -1,7 +1,7 @@
 [project]
 name = "haymish"
 version = "0.1.0"
-description = "Clean up and categorize your Apple Photos library: rule-based sweeps for screenshots, selfies, receipts, duplicates, and junk — with a safe, staged delete lifecycle."
+description = "A local-first, review-first control surface for tagging, grouping, and organizing Apple Photos."
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "osxphotos>=0.76.1,<0.77",

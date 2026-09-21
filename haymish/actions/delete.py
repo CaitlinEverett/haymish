@@ -6,11 +6,11 @@ Division of responsibility (read this before calling confirm_and_delete):
   - confirm_and_delete() is the thin last-mile PhotoKit call. It does NOT check
     backups and does NOT read staged_deletes -- it just deletes whatever uuids it's
     given, gated only by macOS's own un-bypassable system confirmation dialog.
-  - The backup-verification gate (every uuid must satisfy
-    Catalog.is_archived_and_verified()) and any additional typed-confirmation
-    prompt belong to the caller -- the "haymish confirm-deletes" CLI command --
-    not to this module. Keeping this file free of that logic keeps the one function
-    that actually destroys data easy to audit in isolation.
+  - The complete asset-component manifest gate and typed confirmation belong to
+    the caller -- the "haymish confirm-deletes" CLI command -- not to this adapter.
+    That command currently fails closed because legacy Catalog archive rows are not
+    complete manifests. Keeping this file free of policy makes the one function that
+    invokes PhotoKit deletion easy to audit in isolation.
 """
 
 from __future__ import annotations
@@ -38,12 +38,53 @@ class DeleteOutcome:
     error: str = ""
 
 
+def _bare_uuid(local_identifier: str) -> str:
+    """PhotoKit localIdentifiers look like '{uuid}/L0/001'; haymish ledgers store the bare uuid."""
+    return str(local_identifier).split("/", 1)[0]
+
+
+def _distinct_bare(identifiers) -> list[str]:
+    """Bare uuids in first-seen order; '{uuid}' and '{uuid}/L0/001' are one asset."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for ident in identifiers:
+        bare = _bare_uuid(ident)
+        if bare in seen:
+            continue
+        seen.add(bare)
+        out.append(bare)
+    return out
+
+
+def _fetch_keys(uuids: list[str]) -> list[str]:
+    """Fetch keys for PHAsset.fetchAssetsWithLocalIdentifiers_options_.
+
+    A caller-supplied full identifier is passed through verbatim -- the /L0/NNN
+    suffix selects a specific asset resource and is not ours to rewrite (guessing
+    /L0/001 for something the caller called /L0/002 would fetch the wrong asset or
+    nothing at all). A bare catalog uuid has no suffix to preserve, so we also try
+    the /L0/001 form that every identifier observed from this library uses; some
+    PhotoKit versions match only one of the two.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    for u in uuids:
+        ident = str(u)
+        candidates = [ident] if "/" in ident else [ident, f"{ident}/L0/001"]
+        for key in candidates:
+            if key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
 def _fetch_assets_by_uuid(uuids: list[str]):
     import Photos
 
     options = Photos.PHFetchOptions.alloc().init()
     options.setIncludeHiddenAssets_(True)
-    return Photos.PHAsset.fetchAssetsWithLocalIdentifiers_options_(uuids, options)
+    return Photos.PHAsset.fetchAssetsWithLocalIdentifiers_options_(_fetch_keys(uuids), options)
 
 
 def confirm_and_delete(uuids: list[str]) -> DeleteOutcome:
@@ -57,12 +98,21 @@ def confirm_and_delete(uuids: list[str]) -> DeleteOutcome:
     """
     import Photos
 
-    requested = len(uuids)
+    # Counted as distinct assets, not raw arguments: cli.py reports
+    # `requested - len(deleted_uuids)` as "still staged", so counting '{uuid}' and
+    # '{uuid}/L0/001' twice would invent a phantom missing photo.
+    requested = len(_distinct_bare(uuids))
     if not uuids:
         return DeleteOutcome(requested=0, deleted_uuids=[])
 
     fetch = _fetch_assets_by_uuid(uuids)
-    found_uuids = [fetch.objectAtIndex_(i).localIdentifier() for i in range(fetch.count())]
+    # localIdentifier() always returns the suffixed form. The caller (confirm-deletes)
+    # feeds these straight back into catalog.unstage_delete(), which keys on the bare
+    # uuid -- without normalizing, every successful delete leaves its row staged.
+    # Deduped because both fetch keys for one asset can match and return it twice.
+    found_uuids = _distinct_bare(
+        fetch.objectAtIndex_(i).localIdentifier() for i in range(fetch.count())
+    )
     if not found_uuids:
         return DeleteOutcome(requested=requested, deleted_uuids=[],
                               error="none of the requested uuids were found in the library")

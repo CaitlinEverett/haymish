@@ -7,9 +7,9 @@ Design contract (the safety story, restated for this surface):
     injected at load. Host header is checked to block DNS-rebinding tricks.
   - Mutations (apply) act only on explicit uuid selections against a preview
     session this daemon built — the browser review grid is where a human makes
-    that selection. There is NO delete endpoint: staged deletions are visible
-    read-only, and finalizing them stays in `haymish confirm-deletes` where the
-    typed confirmation and the macOS system dialog live.
+    that selection. There is NO delete endpoint: staged candidates are visible
+    read-only. Final deletion remains disabled until complete archive manifests
+    exist; its eventual CLI path also requires typed and macOS confirmation.
 
 Long work (library load, review builds, ask planning, indexing) runs as jobs on
 threads; the API is poll-based (POST returns a job id, GET /api/jobs/<id> reports
@@ -20,6 +20,7 @@ locking plus the busy_timeout in Catalog covers concurrent commits.
 from __future__ import annotations
 
 import hmac
+import html
 import http.server
 import importlib.resources
 import json
@@ -35,13 +36,56 @@ from typing import Any
 from . import library
 from .catalog import Catalog
 from .config import Config, Rule
+from .domain import collection_from_rule
 from .paths import APP_DIR
 from .review import ensure_thumbnail, _thumbnail_path
-from .sweep import RulePreview, apply_confirmed, preview_sweep
+from .sweep import HidePreviewMeta, RulePreview, apply_confirmed, preview_sweep
 
 SERVE_STATE_PATH = APP_DIR / "serve.json"
 DEFAULT_PORT = 8787
 _SESSION_LIMIT = 20  # oldest preview sessions get dropped past this
+
+TOKEN_PLACEHOLDER = "__HAYMISH_TOKEN__"
+
+# Every static asset this daemon will serve, keyed by the exact request path.
+# This is an allowlist, not a document root: there is no path joining, no
+# normalization, and no directory walk, so `/static/dashboard/../../../etc/passwd`
+# resolves to nothing and 404s like any other unknown path. Adding a dashboard
+# asset means adding a line here.
+_STATIC_ASSETS: dict[str, tuple[str, str]] = {
+    "/static/dashboard/styles.css": ("static/dashboard/styles.css", "text/css; charset=utf-8"),
+    "/static/dashboard/app.js": ("static/dashboard/app.js", "text/javascript; charset=utf-8"),
+    "/static/dashboard/components/collections.js": (
+        "static/dashboard/components/collections.js", "text/javascript; charset=utf-8"),
+}
+
+
+def static_asset(path: str) -> tuple[bytes, str] | None:
+    """(body, content type) for an allowlisted asset, or None if not allowlisted.
+
+    Read from package resources so it works the same from a source checkout and
+    an installed wheel.
+    """
+    entry = _STATIC_ASSETS.get(path)
+    if entry is None:
+        return None
+    resource, content_type = entry
+    body = importlib.resources.files("haymish").joinpath(resource).read_bytes()
+    return body, content_type
+
+
+def dashboard_html(token: str) -> str:
+    """The dashboard page with the per-run token injected into its meta element.
+
+    app.js is a static packaged file now, so text substitution into the script
+    is no longer possible -- the token rides in the markup and the module reads
+    it from there. It is escaped as an HTML attribute value even though
+    `secrets.token_hex` can only produce hex: a page that is safe only because
+    of the token's alphabet is one token-format change away from injection.
+    """
+    page = importlib.resources.files("haymish").joinpath(
+        "static/dashboard.html").read_text(encoding="utf-8")
+    return page.replace(TOKEN_PLACEHOLDER, html.escape(token, quote=True))
 
 
 def _explain_library_error(error: Exception, library_path) -> str:
@@ -159,6 +203,68 @@ def _rule_action_label(rule: Rule) -> str:
     return " · ".join(parts) or "report only"
 
 
+def _rule_description(rule: Rule) -> str:
+    return f"From the {rule.pack} rule pack." if rule.pack else ""
+
+
+def _stale_caption_count(config: Config, caption_models: dict[str, int]) -> int:
+    """Count captions not keyed to the configured model and prompt version."""
+    from .ai.indexer import caption_key
+
+    current = caption_key(config)
+    return sum(count for key, count in caption_models.items() if key != current)
+
+
+def collections_payload(config: Config, overrides: dict[str, bool] | None = None) -> list[dict]:
+    """Each legacy rule compiled through the domain model, as JSON-safe entries.
+
+    Pure: it reads the config and the catalog's enable/disable overrides that
+    the caller already fetched, and touches neither the catalog nor Photos. The
+    compiled values are the canonical `to_dict()` forms, so a client sees the
+    same shape the revisions were computed over.
+
+    A rule the domain model cannot express yet (one with no lens evidence, say)
+    carries its own `error` instead of taking the whole list down or quietly
+    disappearing from it: a visible gap is honest, a shorter list is not.
+    """
+    overrides = overrides or {}
+    entries: list[dict] = []
+    for rule in config.rules:
+        description = _rule_description(rule)
+        entry: dict[str, Any] = {
+            "id": rule.name,
+            "name": rule.name,
+            "description": description,
+            "source": "legacy-rule",
+            "enabled": bool(overrides.get(rule.name, rule.enabled)),
+            "report_only": bool(rule.report_only),
+            "collection_revision": None,
+            "lens_revision": None,
+            "disposition_revision": None,
+            "lens": None,
+            "disposition": None,
+            "error": None,
+        }
+        try:
+            collection = collection_from_rule(rule, description=description)
+            compiled = {
+                "id": collection.id,
+                "name": collection.name,
+                "description": collection.description,
+                "collection_revision": collection.revision,
+                "lens_revision": collection.lens.revision,
+                "disposition_revision": collection.disposition.revision,
+                "lens": collection.lens.to_dict(),
+                "disposition": collection.disposition.to_dict(),
+            }
+        except Exception as error:
+            entry["error"] = f"{type(error).__name__}: {error}"
+        else:
+            entry.update(compiled)
+        entries.append(entry)
+    return entries
+
+
 def _subgroups_for(state: "ServeState", previews) -> dict[str, list[dict]]:
     """rule name -> labelled sub-groups, for rules matching enough photos that a
     flat grid stops being reviewable. Best-effort: any failure just means the
@@ -185,6 +291,17 @@ def _subgroups_for(state: "ServeState", previews) -> dict[str, list[dict]]:
     return out
 
 
+def _hide_preview_json(meta: HidePreviewMeta | None) -> dict | None:
+    if meta is None:
+        return None
+    return {
+        "due": meta.due,
+        "hideable": meta.hideable,
+        "skipped_icloud": meta.skipped_icloud,
+        "already_hidden": meta.already_hidden,
+    }
+
+
 def _session_payload(session_id: str, session: dict) -> dict:
     subgroups = session.get("subgroups") or {}
     return {
@@ -195,6 +312,7 @@ def _session_payload(session_id: str, session: dict) -> dict:
                 "name": rp.rule.name,
                 "action": _rule_action_label(rp.rule),
                 "errors": rp.errors,
+                "hide": _hide_preview_json(rp.hide_preview),
                 # Present only for big, heterogeneous queues. A screenshots rule
                 # can match thousands of unrelated things -- FaceTime stills, web
                 # pages, receipts, photos of people -- and no single answer to
@@ -283,10 +401,15 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             return
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
-            page = importlib.resources.files("haymish").joinpath(
-                "static/dashboard.html").read_text()
-            page = page.replace("__HAYMISH_TOKEN__", self.state.token)
-            self._send(200, "text/html; charset=utf-8", page.encode())
+            self._send(200, "text/html; charset=utf-8",
+                       dashboard_html(self.state.token).encode())
+        elif path.startswith("/static/"):
+            asset = static_asset(path)
+            if asset is None:
+                self._send(404, "text/plain", b"not found")
+                return
+            body, content_type = asset
+            self._send(200, content_type, body)
         elif path == "/api/health":
             self._json({"ok": True, "app": "haymish"})
         elif path.startswith("/thumb/"):
@@ -322,6 +445,15 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
         state = self.state
         if path == "/api/status":
             self._json(self._status_payload())
+        elif path == "/api/collections":
+            # Read-only and library-free: the compile is pure, so the only
+            # runtime state needed is the enable/disable overrides.
+            catalog = Catalog()
+            try:
+                overrides = catalog.rule_overrides()
+            finally:
+                catalog.close()
+            self._json({"collections": collections_payload(state.config, overrides)})
         elif path.startswith("/api/jobs/"):
             job = state.jobs.get(path.rsplit("/", 1)[1])
             if job is None:
@@ -345,8 +477,8 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             finally:
                 catalog.close()
             self._json({"staged": rows,
-                        "note": "Finalize in a terminal with `haymish confirm-deletes` — "
-                                "deletion is never available from this dashboard."})
+                        "note": "Final deletion is disabled until complete asset-component "
+                                "backup manifests are implemented and re-verifiable."})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -365,14 +497,13 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
 
         library_stats = {"loaded": state.photosdb is not None,
                          "error": state.photosdb_error}
-        # Caption models other than the configured one mean the vision model was
-        # upgraded and those captions are stale -- surfaced so the dashboard can
-        # offer a refresh instead of silently serving old descriptions.
+        # Caption identity includes the prompt version as well as the vision
+        # model. Comparing against the raw model name marks every current caption
+        # stale because catalog keys look like "model+p2".
         index = {
             "embedded": len(embedded),
             "caption_models": caption_models,
-            "stale_captions": sum(n for m, n in caption_models.items()
-                                   if m != state.config.ai_vision_model),
+            "stale_captions": _stale_caption_count(state.config, caption_models),
         }
         if state.photosdb is not None:
             photos = library.all_photos(state.photosdb)

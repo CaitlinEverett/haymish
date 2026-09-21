@@ -3,13 +3,15 @@
 *Haymish (Yiddish, from "heymish") — cozy, unpretentious, at ease. The goal: a camera roll
 that feels that way instead of cluttered with screenshots and duplicates.*
 
-Clean up and categorize your Apple Photos library with rule-based sweeps: screenshots,
-selfies, receipts, message screenshots, duplicates, and junk — filed into albums, tagged
-with keywords, hidden from the roll, archived to a backup volume, and (only ever with
-your explicit confirmation) deleted.
+Review and organize an Apple Photos library with rule-based collections: screenshots,
+selfies, receipts, message screenshots, and related captures can be annotated with
+keywords and added to album views. Visibility, backup, and cleanup are separate policies.
+Final deletion is currently disabled while complete Live Photo/RAW backup manifests are
+implemented.
 
-Works against the modern Photos library (`~/Pictures/Photos Library.photoslibrary`);
-actions sync everywhere via iCloud Photos.
+Haymish reads the modern Photos library (`~/Pictures/Photos Library.photoslibrary`) and
+applies supported Photos changes through Apple automation APIs. Cross-device behavior
+must be verified during the first canary; it is not assumed from local success.
 
 ## Setup
 
@@ -37,8 +39,9 @@ uv run haymish undo                            # if something looks wrong after 
 remembered and won't resurface), then Apply. Same stage code as `sweep --apply` —
 no separate apply path that can drift.
 
-Archive/delete stages need `[global].backup` set in `~/.haymish/rules.toml` (USB
-stick path is fine). File + hide work without it.
+The installed starter rules are additive only: album/keyword actions, with no default
+hide, archive, or deletion stages. Do not enable state-changing stages before a reviewed
+canary and verified undo.
 
 ## Prompts: ask, find, and semantic rules
 
@@ -71,10 +74,10 @@ file = { album = "Recipes" }
 what's requested; archive and delete stay in `rules.toml` plus the staged
 `confirm-deletes` flow.
 
-**Videos are covered too.** Rules can target them with `movie = true` or
-`screen_recording = true` query flags; the index captions each video's poster
-frame, so `find` and `ask` see them; every action (file, hide, archive, delete)
-works on videos the same as photos.
+**Videos are included in selection and organization.** Rules can target them with
+`movie = true` or `screen_recording = true`; the index captions a poster-frame
+derivative when available. Album/keyword behavior still needs the same real canary as
+photos, and backup/deletion parity is not claimed before complete manifests exist.
 
 ## Commands
 
@@ -89,9 +92,9 @@ works on videos the same as photos.
 | `index` | Build/refresh the local caption+embedding index behind ask/find/semantic rules |
 | `scan` | Read-only inventory + report: screenshots by age, selfies, receipt/message candidates, duplicates, junk-score calibration, people-tag hygiene |
 | `sweep [rule]` | Run rules from `rules.toml`. **Dry-run by default**; `--apply` to act blindly |
-| `confirm-deletes` | Review staged deletions; requires verified backup copies; macOS shows its own final confirmation dialog |
-| `undo` | Reverse the last sweep's album/keyword/hide actions |
-| `archive` | Export originals to the backup volume, checksum-verified |
+| `confirm-deletes` | Fails closed in this build until complete asset-component backup manifests exist; later also requires typed and macOS confirmation |
+| `undo` | Reverse supported album/keyword/hide/staged-delete actions from ordinary sweep/review runs |
+| `archive` | Export an integrity-tracked file to the backup volume; complete Live Photo/RAW manifests are not implemented yet |
 | `import <files>` | Import files into Photos and immediately run rules on them |
 | `schedule` | Install a launchd job: refreshes the AI index, then sweeps — periodically, unattended |
 | `menubar` | Menu-bar app: Review Now, Sweep Now, Confirm Deletes |
@@ -103,7 +106,8 @@ works on videos the same as photos.
 status at a glance, the ask box, semantic find, the review queue with thumbnails,
 rule toggles, and index refresh — all served from a daemon bound to 127.0.0.1
 with a per-run token. Deletion is never available from the dashboard; staged
-deletes are shown read-only and finalized only via `haymish confirm-deletes`.
+candidates are read-only, and `haymish confirm-deletes` currently refuses finalization
+until complete asset-component manifests are implemented.
 
 ## Your AI as a photo librarian (MCP)
 
@@ -128,18 +132,18 @@ file (album/keyword, immediate) → hide (off the roll) → archive (backup copy
 
 Ages are relative to the photo's own date, so behavior is predictable.
 
-**Deletion is deliberately hard.** Scheduled sweeps only *stage* deletions. Nothing
-is removed until you run `confirm-deletes`, which refuses without checksum-verified
-backup copies and ends at a macOS system dialog that cannot be scripted away.
-Treat deletion as permanent; keep a backup volume (a USB stick works) configured in
-`[global].backup`.
+**Deletion currently fails closed.** Scheduled sweeps can only stage candidates. The
+legacy archive ledger records one exported file and cannot prove complete coverage for
+Live Photo motion or associated RAW components, so `confirm-deletes` refuses to remove
+anything in this build. Complete independently re-verified manifests, an exact typed
+confirmation, and the macOS system dialog are required before finalization is re-enabled.
 
 ## Safety model
 
 - Dry-run by default everywhere; every applied action is logged and `undo`-able
   (album, keyword, hide).
-- Deletes are staged → human-confirmed → OS-confirmed → Recently Deleted (30-day
-  window) — four layers.
+- Cleanup candidates can be staged, but final deletion remains disabled until the
+  complete-manifest gate is implemented and tested.
 - The Photos library file is never touched directly; all writes go through Apple's
   supported automation APIs.
 

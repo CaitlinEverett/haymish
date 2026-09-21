@@ -7,6 +7,7 @@ code should use these helpers so error handling stays consistent.
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import httpx
 
@@ -15,7 +16,18 @@ class AIError(Exception):
     """The AI layer couldn't produce a result (Ollama down, model missing, bad output)."""
 
 
-def _post(host: str, path: str, payload: dict, timeout: float) -> dict:
+class OllamaHTTPError(AIError):
+    """A non-success response whose status/body callers may need to classify."""
+
+    def __init__(self, status_code: int, detail: str):
+        self.status_code: int = status_code
+        self.detail: str = detail
+        super().__init__(f"Ollama returned HTTP {status_code}: {detail[:200]}")
+
+
+def _post(
+    host: str, path: str, payload: dict[str, Any], timeout: float
+) -> dict[str, Any]:
     try:
         response = httpx.post(f"{host}{path}", json=payload, timeout=timeout)
     except httpx.ConnectError as e:
@@ -28,34 +40,51 @@ def _post(host: str, path: str, payload: dict, timeout: float) -> dict:
             f"Try: ollama pull {payload.get('model')}"
         )
     if response.status_code != 200:
-        raise AIError(f"Ollama returned HTTP {response.status_code}: {response.text[:200]}")
+        raise OllamaHTTPError(response.status_code, response.text)
     return response.json()
 
 
 def generate(host: str, model: str, prompt: str, image_bytes: bytes | None = None,
              format_json: bool = False, think: bool | None = None,
+             options: dict[str, int | float] | None = None,
              timeout: float = 180) -> str:
-    """think=False disables thinking mode — required for reasoning-family models
-    (qwen3 etc.) with format_json, where thinking otherwise consumes the whole
-    output and 'response' comes back empty. Retries without the option for models
-    that reject it."""
-    payload: dict = {"model": model, "prompt": prompt, "stream": False}
+    """Generate text, optionally disabling reasoning-family thinking mode.
+
+    Older Ollama versions may reject the ``think`` field. Retry without it only
+    for an explicit 400/422 rejection naming that field. Timeouts, connection
+    failures, and server errors must not silently become a second full inference.
+    """
+    payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
     if image_bytes is not None:
         payload["images"] = [base64.b64encode(image_bytes).decode("ascii")]
     if format_json:
         payload["format"] = "json"
     if think is not None:
         payload["think"] = think
+    if options:
+        payload["options"] = dict(options)
     try:
         body = _post(host, "/api/generate", payload, timeout)
-    except AIError:
-        if think is None:
+    except OllamaHTTPError as error:
+        rejected_think = (
+            think is not None
+            and error.status_code in {400, 422}
+            and "think" in error.detail.lower()
+        )
+        if not rejected_think:
             raise
         payload.pop("think")
         body = _post(host, "/api/generate", payload, timeout)
     if "response" not in body:
         raise AIError(f"Ollama response missing 'response' key: {str(body)[:200]}")
-    return body["response"]
+    text = str(body["response"])
+    if not text.strip():
+        reason = body.get("done_reason") or "unknown"
+        raise AIError(
+            f"Ollama returned an empty response (done_reason={reason!r}); "
+            "the model may have spent its output budget on hidden reasoning"
+        )
+    return text
 
 
 def embed(host: str, model: str, texts: list[str], timeout: float = 120) -> list[list[float]]:

@@ -29,6 +29,20 @@ def all_photos(photosdb) -> list:
     return photosdb.photos(intrash=False)
 
 
+def photo_is_hideable(photo) -> bool:
+    """True when the hide lifecycle stage could act on this photo.
+
+    Already-hidden photos are skipped so sweeps do not re-log hide actions.
+    iCloud-only originals (osxphotos ismissing=True) are skipped because hide
+    often succeeds but programmatic unhide then fails — see actions/hide.py.
+    """
+    if getattr(photo, "hidden", False):
+        return False
+    if getattr(photo, "ismissing", False):
+        return False
+    return True
+
+
 def photo_age_days(photo, now: dt.datetime | None = None) -> float | None:
     date = getattr(photo, "date", None)
     if date is None:

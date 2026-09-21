@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Haymish — a calm camera roll</title>
-<meta name="description" content="Haymish is a macOS tool that keeps your Apple Photos camera roll feeling calm: rule-based sweeps, plain-language control, local AI, and deletion that is deliberately hard.">
+<meta name="description" content="Haymish is a local-first, review-first macOS workbench for tagging, grouping, and organizing Apple Photos. Private development preview; final deletion is disabled.">
 <style>
 :root {
   --paper: #faf6ee;
@@ -372,10 +372,10 @@ footer .word { font-family: var(--serif); font-style: italic; }
   <div class="wrap">
     <h1>haym<span class="tail">ish</span></h1>
     <p class="gloss">Yiddish, from <em>heymish</em> — cozy, unpretentious, at&nbsp;ease. What a camera roll should feel like.</p>
-    <p class="what">A macOS tool that keeps your Apple Photos library calm: rule-based sweeps file the screenshots, selfies, receipts, and screen recordings away — gently, reviewably, and never destructively behind your back.</p>
+    <p class="what">A local-first macOS workbench for reviewing, tagging, grouping, and organizing screenshots, family photos, documents, and shoots without creating a second photo silo.</p>
     <div class="cta-row">
       <a class="btn" href="https://github.com/CaitlinEverett/haymish">View on GitHub</a>
-      <span class="free-note">Free &amp; source-available</span>
+      <span class="free-note">Private development preview · licensing undecided</span>
     </div>
     <div class="install" role="figure" aria-label="Install commands">
       <code><span class="c"># install</span>
@@ -394,7 +394,7 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
   <div class="wrap">
     <p class="kicker">How it feels</p>
     <h2>Tidy, without the dread</h2>
-    <p class="lede">Haymish works on photos and videos alike. You describe what belongs where; it shows you exactly what it plans to do; you approve. That's the whole loop.</p>
+    <p class="lede">The intended loop is simple: describe or build a collection, inspect the exact candidates and effects, then approve. The first live album/tag canary and cross-device verification are still pending.</p>
     <div class="vignettes">
 
       <article class="vignette">
@@ -414,8 +414,8 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
           </div>
           <div class="applybar"><span>6 of 8 selected</span><span class="applybtn">Apply</span></div>
         </div>
-        <h3>Review before anything moves</h3>
-        <p>Every action opens a thumbnail review on localhost. Uncheck the false positives — they're remembered and won't resurface — then Apply. The review uses the same code path as <code>sweep --apply</code>, so what you approve is exactly what runs.</p>
+        <h3>Review before applying</h3>
+        <p>The recommended path opens a thumbnail review on localhost before applying supported album or keyword changes. Unchecked items are remembered today, although richer versioned judgments are still being built. Reviewed and command-line application share the same stage code.</p>
       </article>
 
       <article class="vignette">
@@ -424,12 +424,12 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
           <div class="rung-arrow">↓</div>
           <div class="rung"><span class="stage">hide</span><span>off the roll, still yours</span><span class="when">after 14 days</span></div>
           <div class="rung-arrow">↓</div>
-          <div class="rung"><span class="stage">archive</span><span>checksum-verified backup</span><span class="when">after 60 days</span></div>
+          <div class="rung"><span class="stage">archive</span><span>integrity-tracked export</span><span class="when">optional</span></div>
           <div class="rung-arrow">↓</div>
-          <div class="rung last"><span class="stage">delete</span><span>staged, never automatic</span><span class="when">after 90 days</span></div>
+          <div class="rung last"><span class="stage">delete</span><span>staged; finalization disabled</span><span class="when">for now</span></div>
         </div>
-        <h3>A gentle lifecycle, not a purge</h3>
-        <p>Each rule walks an age-gated ladder — file, then hide, then archive, then <em>stage</em> for deletion. Ages count from the photo's own date, so behavior is predictable: "screenshots older than two weeks leave the roll," full stop. Filed and hidden state syncs everywhere via iCloud Photos.</p>
+        <h3>Separate organization from cleanup</h3>
+        <p>The starter posture only annotates and adds album views. Hide, backup, and staged cleanup are separate opt-in policies, not synonyms for organization. Final deletion stays disabled until complete Live Photo/RAW manifests and cross-device behavior are verified.</p>
       </article>
 
       <article class="vignette">
@@ -438,8 +438,8 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
           <div class="laptop-line"><span class="chip off">the cloud</span><span>not involved</span></div>
           <div class="laptop-line"><span class="chip">Claude API</span><span>strictly opt-in, per rule</span></div>
         </div>
-        <h3>The AI stays home</h3>
-        <p><code>haymish index</code> builds a caption and embedding for every photo — all on your Mac via Ollama. Your photos never leave the machine. One exception, and only if you ask for it: individual rules can opt in to the Claude API.</p>
+        <h3>Local by default</h3>
+        <p><code>haymish index</code> can build local captions and embeddings via Ollama, with explicit coverage and model limits. Photos are not uploaded by default. A rule may opt into a remote provider only when that choice is configured and disclosed.</p>
       </article>
 
     </div>
@@ -449,16 +449,16 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
 <section class="safety" id="safety">
   <div class="wrap">
     <p class="kicker">The safety model</p>
-    <h2>Deletion is deliberately hard</h2>
-    <p class="lede">This is the identity of the tool, not a footnote. Everything is dry-run by default, every applied action is logged and undoable, and removing a photo for good means passing four gates — in order, every time.</p>
+    <h2>Deletion fails closed</h2>
+    <p class="lede">This is the identity of the tool, not a footnote. Ordinary sweeps are dry-run by default and supported additive/state changes use an action ledger. Final deletion is disabled in the current build while its complete backup-manifest gate is implemented.</p>
     <ol class="stepper">
       <li>
         <h3>Staged, never automatic</h3>
         <p>Scheduled sweeps can only <em>stage</em> deletions — they can never remove anything unattended. Plain-language prompts can't even do that: <code>ask</code> plans are stripped to file, tag, and hide, no matter what's requested.</p>
       </li>
       <li>
-        <h3>A verified backup copy exists</h3>
-        <p><code>confirm-deletes</code> refuses to proceed unless the original has been archived to your backup volume and the copy is checksum-verified. No backup, no delete.</p>
+        <h3>A complete backup manifest exists</h3>
+        <p>A deletion-grade manifest must cover every applicable component, including Live Photo motion and associated RAW files, and every component must be re-verified independently. Legacy single-file archive rows do not qualify, so <code>confirm-deletes</code> currently refuses to proceed.</p>
       </li>
       <li>
         <h3>You confirm, deliberately</h3>
@@ -479,11 +479,11 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
     <h2>Questions you should ask</h2>
     <details>
       <summary>Is my library safe?</summary>
-      <p><span class="yesno">Yes.</span> Haymish never touches the Photos library file directly — all writes go through Apple's supported automation APIs. Everything is dry-run by default, every applied action is logged, and album, keyword, and hide actions are reversible with <code>haymish undo</code>. Deletion sits behind the four gates above.</p>
+      <p><span class="yesno">Safety is the gate, not a claim.</span> Haymish never writes directly to the Photos database; supported mutations go through Apple automation APIs. Automated tests are isolated, final deletion is disabled, and the first real album/tag canary plus verified undo still need live validation before broader trust claims.</p>
     </details>
     <details>
       <summary>Can it delete things by itself?</summary>
-      <p><span class="yesno no">No.</span> Scheduled sweeps only stage deletions. Nothing is removed until you run <code>confirm-deletes</code>, which requires a checksum-verified backup copy, your typed confirmation, and macOS's own system dialog. Prompts can never delete at all.</p>
+      <p><span class="yesno no">No.</span> Scheduled work can only stage reviewed candidates, and the current build cannot finalize them at all. Re-enabling <code>confirm-deletes</code> requires complete manifests first; typed confirmation and macOS's own dialog remain additional mandatory gates. Prompts can never finalize deletion.</p>
     </details>
     <details>
       <summary>Where does the AI run?</summary>
@@ -491,15 +491,15 @@ uv run haymish doctor    <span class="c"># checks permissions &amp; backends</sp
     </details>
     <details>
       <summary>What about my iPhone?</summary>
-      <p>Haymish runs on your Mac, but its actions — albums, keywords, hidden state — sync everywhere through iCloud Photos. Sweep on the Mac; the calm roll shows up on your phone.</p>
+      <p>Haymish writes Photos-native albums, keywords, and supported state on the Mac so it does not create a second photo silo. Exact iCloud/iPhone results still need live canary verification and may depend on Apple's sync behavior.</p>
     </details>
     <details>
       <summary>Does it handle videos?</summary>
-      <p><span class="yesno">Yes.</span> Rules can target videos and screen recordings directly, the AI index captions each video's poster frame so <code>find</code> and <code>ask</code> see them, and every action — file, hide, archive, delete — works on videos the same as photos.</p>
+      <p>Rules can target videos and screen recordings, and the index can use a local poster-frame derivative. Album/keyword behavior still needs live canary validation; complete backup and deletion parity is not claimed yet.</p>
     </details>
     <details>
       <summary>What does it cost?</summary>
-      <p>Nothing. It's free, and the source is on <a href="https://github.com/CaitlinEverett/haymish">GitHub</a>.</p>
+      <p>Pricing and licensing are not decided. The repository is public but currently unlicensed; private pilots will test a generous trust-floor core plus paid Personal/Studio craft before any launch promise.</p>
     </details>
   </div>
 </section>

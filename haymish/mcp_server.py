@@ -222,13 +222,12 @@ def create_server():
 
     @mcp.tool()
     def haymish_staged_deletes() -> dict:
-        """Read-only manifest of photos currently staged for deletion,
-        including whether each has a verified backup copy.
+        """Read-only list of staged cleanup candidates and legacy archive status.
 
         Purely informational: nothing on this surface can stage, unstage, or
-        finalize a deletion. Finalizing happens only via `haymish
-        confirm-deletes` in a terminal — typed confirmation plus the macOS
-        system dialog — and requires verified backups first.
+        finalize deletion. Final deletion currently fails closed because complete
+        asset-component manifests are not implemented; a future CLI flow will also
+        require typed confirmation and the macOS system dialog.
         """
         url, headers = _connect()
         return _get(url, headers, "/api/staged-deletes")

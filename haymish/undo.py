@@ -94,14 +94,24 @@ def undo_run(catalog: Catalog, run_id: str | None = None) -> UndoReport:
 
     if hide_pairs:
         by_uuid = _dedupe_by_uuid(hide_pairs)
-        results = hide_action.unhide_photos(list(by_uuid))
+        try:
+            results = hide_action.unhide_photos(list(by_uuid))
+        except Exception as e:
+            from .doctor import photokit_access_fix_hint
+
+            report.errors.append(
+                f"could not unhide via PhotoKit: {e}. "
+                f"If access was denied, fix {photokit_access_fix_hint()}, then try "
+                f"`haymish recover-hidden --run-id {run_id}` or unhide manually in Photos' Hidden album."
+            )
+            results = {}
         n = 0
         for uuid, action_ids in by_uuid.items():
             if results.get(uuid) == "ok":
                 for action_id in action_ids:
                     catalog.mark_undone(action_id)
                 n += 1
-            else:
+            elif results:
                 report.errors.append(f"could not unhide {uuid}: {results.get(uuid)}")
         report.reversed_counts["hide"] = n
 

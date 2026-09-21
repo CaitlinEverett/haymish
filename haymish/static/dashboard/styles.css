@@ -1,0 +1,201 @@
+:root{ --ink:#17191c; --ink-2:#585c5f; --ink-3:#8a8e90; --paper:#f6f6f4; --card:#fff;
+  --line:#dfe1de; --accent:#1f5c56; --accent-tint:#e2eeec;
+  --amber:#8a6100; --amber-tint:#f4e8c8; --green:#2c6b33; --green-tint:#dcecd9;
+  --red:#a13333; --red-tint:#f6dede; }
+@media (prefers-color-scheme: dark){
+  :root{ --ink:#e9eae7; --ink-2:#b7bab6; --ink-3:#84898a; --paper:#15171a; --card:#1c1f22;
+    --line:#2c3033; --accent:#5fb3a8; --accent-tint:#1d3532;
+    --amber:#e3b859; --amber-tint:#38301c; --green:#8cc98a; --green-tint:#1e3320;
+    --red:#e08a8a; --red-tint:#3a2222; }
+}
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif; line-height:1.5;}
+.wrap{max-width:1040px; margin:0 auto; padding:1rem 1.5rem 7rem;}
+
+/* -- header bar -- */
+.topbar{display:flex; align-items:center; gap:1rem; flex-wrap:wrap;
+  border-bottom:1px solid var(--line); background:var(--card); padding:.7rem 1.5rem;}
+.wordmark{font-size:18px; font-weight:600; letter-spacing:.01em;}
+.chips{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+.chip{display:inline-block; font:inherit; font-size:12.5px; border-radius:999px;
+  padding:2px 11px; border:1px solid var(--line); background:var(--paper); color:var(--ink-2);}
+.chip.green{background:var(--green-tint); color:var(--green); border-color:transparent;}
+.chip.amber{background:var(--amber-tint); color:var(--amber); border-color:transparent;}
+button.chip{cursor:pointer;}
+
+/* -- banners -- */
+.banner{display:flex; align-items:baseline; gap:.8rem; background:var(--red-tint); color:var(--red);
+  border:1px solid var(--red); border-radius:8px; padding:.55rem .9rem; margin:.9rem 0 0;
+  font-size:13.5px;}
+.banner .msg{flex:1; overflow-wrap:anywhere;}
+.banner .dismiss{background:none; border:none; color:inherit; cursor:pointer; font-size:15px;
+  padding:0; line-height:1;}
+
+/* -- sections -- */
+section.block{margin-top:2rem;}
+h2{font-size:16px; font-weight:500; margin:0 0 .2rem;}
+.sub{color:var(--ink-2); font-size:13.5px; margin:0 0 .8rem;}
+.muted{color:var(--ink-3); font-size:12.5px;}
+
+/* -- ask / find boxes -- */
+.boxes{display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1.4rem;}
+@media (max-width:760px){ .boxes{grid-template-columns:1fr;} }
+.box{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem;}
+.box.primary{border-color:var(--accent);}
+.inline-form{display:flex; gap:8px; margin-top:.5rem;}
+input[type=text]{flex:1; min-width:0; font:inherit; font-size:14px; color:var(--ink);
+  background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:.45rem .7rem;}
+input[type=text]:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+button.action{background:var(--accent); color:var(--accent-tint); border:none; border-radius:6px;
+  padding:.45rem 1rem; font:inherit; font-size:14px; font-weight:500; cursor:pointer; white-space:nowrap;}
+button.action:disabled{opacity:.5; cursor:default;}
+button.secondary{background:var(--paper); color:var(--accent); border:1px solid var(--line);
+  border-radius:6px; padding:.45rem 1rem; font:inherit; font-size:14px; cursor:pointer; white-space:nowrap;}
+button.secondary:disabled{opacity:.5; cursor:default;}
+.progress{font-size:13px; color:var(--ink-2); margin-top:.5rem; min-height:1.2em;}
+
+/* -- review grid (shared component) -- */
+.plan-desc{background:var(--accent-tint); color:var(--accent); border-radius:8px;
+  padding:.6rem .9rem; font-size:13.5px; margin:0 0 1.2rem;}
+.rule-section{margin-bottom:2.2rem;}
+.rule-header{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+  border-bottom:1px solid var(--line); padding-bottom:.5rem; margin-bottom:1rem;}
+h3{font-size:15px; font-weight:500; margin:0;}
+.rule-meta{font-size:12.5px; color:var(--ink-3); margin:2px 0 0;}
+.rule-error{font-size:12.5px; color:var(--red); margin:4px 0 0;}
+.rule-actions{display:flex; gap:10px; flex-shrink:0;}
+.link-btn{background:none; border:none; color:var(--accent); font-size:12.5px; cursor:pointer;
+  padding:0; text-decoration:underline;}
+.grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px;}
+.card{position:relative; display:block; cursor:pointer; border-radius:8px; overflow:hidden;
+  border:1px solid var(--line); background:var(--card);}
+.card input.pick{position:absolute; top:8px; left:8px; width:18px; height:18px; z-index:2;}
+.thumb{aspect-ratio:1; background:var(--paper); display:flex; align-items:center; justify-content:center;}
+.thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+.no-thumb{color:var(--ink-3); font-size:11px;}
+.card:has(input.pick:not(:checked)){opacity:.35;}
+.filename{font-size:11px; color:var(--ink-2); margin:6px 8px 2px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;}
+.detail{font-size:10.5px; color:var(--ink-3); margin:0 8px 8px; font-style:italic;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.score{position:absolute; top:8px; right:8px; z-index:2; background:var(--accent);
+  color:var(--accent-tint); font-size:10.5px; border-radius:999px; padding:1px 7px;}
+
+/* -- review sub-groups (server-clustered queues; review convenience only) -- */
+/* Same trap as .bar/.gal-bar: .grid's display:grid outranks the UA's bare
+   [hidden] rule, so a folded group would stay on screen without this. */
+.grid[hidden]{display:none;}
+.subgroup{margin:0 0 1.3rem;}
+.subgroup:last-child{margin-bottom:0;}
+.subgroup-header{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+  border-bottom:1px dashed var(--line); padding-bottom:.35rem; margin-bottom:.7rem;}
+.subgroup-title{font-size:13px; font-weight:500; margin:0; color:var(--ink-2);
+  overflow-wrap:anywhere;}
+.subgroup-count{color:var(--ink-3); font-weight:400; white-space:nowrap;}
+.subgroup-actions{display:flex; gap:10px; flex-shrink:0;}
+.subgroup[data-folded="1"] .subgroup-header{border-bottom-style:solid; margin-bottom:0;}
+.view-toggle{display:inline-flex; gap:8px; align-items:baseline; margin-right:4px;
+  padding-right:10px; border-right:1px solid var(--line);}
+.link-btn[aria-pressed="true"]{color:var(--ink); font-weight:600; text-decoration:none;}
+.link-btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px;}
+
+/* -- galleries (collapsed covers; click to expand members) -- */
+input[type=number]{width:5.2rem; font:inherit; font-size:14px; color:var(--ink);
+  background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:.45rem .5rem;}
+input[type=number]:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+.field-label{align-self:center; white-space:nowrap;}
+.gal-card{cursor:pointer;}
+.gal-card:hover{border-color:var(--accent);}
+.gal-card:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+.gal-card[aria-expanded="true"]{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent);}
+.gal-panel{grid-column:1/-1; background:var(--card); border:1px solid var(--accent);
+  border-radius:10px; padding:.9rem 1rem 1rem;}
+.gal-panel-head{display:flex; justify-content:space-between; align-items:baseline; gap:1rem;
+  border-bottom:1px solid var(--line); padding-bottom:.5rem;}
+.gal-members{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:8px;
+  margin-top:.8rem;}
+.gal-members .thumb{border:1px solid var(--line); border-radius:6px; overflow:hidden;}
+.gal-more{margin-top:.7rem;}
+
+/* -- gallery editing (save picker, album name, per-photo removal, decline) -- */
+.gal-pick{position:absolute; top:8px; left:8px; width:18px; height:18px; z-index:3; margin:0;
+  accent-color:var(--accent); cursor:pointer;}
+.gal-note{font-size:10.5px; color:var(--amber); margin:0 8px 5px; overflow-wrap:anywhere;}
+.gal-edit{margin:2px 8px 8px;}
+.gal-row{display:flex; justify-content:space-between; align-items:baseline; gap:6px; margin-bottom:3px;}
+.gal-lbl{font-size:10.5px; color:var(--ink-3);}
+input[type=text].gal-album{width:100%; flex:none; font-size:12.5px; padding:.3rem .45rem; cursor:text;}
+.gal-declined{cursor:default; display:flex; flex-direction:column; justify-content:center;
+  gap:.35rem; padding:.8rem .9rem;}
+.gal-declined .link-btn{align-self:flex-start;}
+.gal-member{position:relative;}
+.gal-member.gal-removed .thumb{opacity:.28; filter:grayscale(1);}
+.gal-member.gal-removed{outline:1px dashed var(--ink-3); outline-offset:-1px; border-radius:6px;}
+.gal-x{position:absolute; top:3px; right:3px; z-index:2; width:20px; height:20px; padding:0;
+  line-height:1; border-radius:999px; border:1px solid var(--line); background:var(--card);
+  color:var(--ink-2); font:inherit; font-size:11px; cursor:pointer; opacity:0;}
+.gal-member:hover .gal-x, .gal-member.gal-removed .gal-x, .gal-x:focus{opacity:1;}
+.gal-x:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+.gal-bar{display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-top:1rem;
+  background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.7rem 1rem;}
+/* display:flex would otherwise beat the UA [hidden] rule and pin the bar open */
+.gal-bar[hidden]{display:none;}
+.gal-bar .count{font-size:14px; color:var(--ink-2);}
+.gal-bar .hint{font-size:12px; color:var(--ink-3); flex:1;}
+.gal-bar .status{font-size:13px; color:var(--ink-2);}
+
+/* -- apply bar -- */
+/* The UA's [hidden]{display:none} is a bare attribute selector, so .bar's
+   display:flex outranks it and the apply bar stayed visible ("0 selected ·
+   Apply selected") with no review session open. Class+attribute outranks the
+   class alone, so this wins wherever it sits. */
+.bar[hidden]{display:none;}
+.bar{position:fixed; bottom:0; left:0; right:0; background:var(--card); border-top:1px solid var(--line);
+  padding:.9rem 1.5rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; z-index:5;}
+.bar .count{font-size:14px; color:var(--ink-2);}
+.bar .hint{font-size:12px; color:var(--ink-3); flex:1;}
+.bar .status{font-size:13px; color:var(--ink-2);}
+
+/* -- outcomes -- */
+.outcome{background:var(--card); border:1px solid var(--line); border-radius:8px;
+  padding:.8rem 1rem; font-size:13.5px; margin-top:.8rem;}
+.outcome ul{margin:.3rem 0 0; padding-left:1.2rem;}
+.outcome .err{color:var(--red);}
+
+/* -- staged panel -- */
+.panel{background:var(--card); border:1px solid var(--line); border-radius:10px;
+  padding:1rem 1.1rem; margin-top:1.4rem;}
+table{border-collapse:collapse; width:100%; font-size:12.5px; margin-top:.5rem;}
+th{text-align:left; color:var(--ink-3); font-weight:500; border-bottom:1px solid var(--line);
+  padding:.25rem .6rem .25rem 0;}
+td{border-bottom:1px solid var(--line); padding:.3rem .6rem .3rem 0; color:var(--ink-2);
+  overflow-wrap:anywhere;}
+.note{font-size:12.5px; color:var(--amber); background:var(--amber-tint); border-radius:6px;
+  padding:.45rem .8rem; margin-top:.7rem;}
+
+/* -- rules -- */
+.rule-row{display:flex; align-items:center; gap:.8rem; padding:.5rem 0;
+  border-bottom:1px solid var(--line);}
+.rule-row:last-child{border-bottom:none;}
+.rule-row .rname{font-size:14px;}
+.rule-row .raction{font-size:12px; color:var(--ink-3); flex:1;}
+.tag{font-size:10.5px; color:var(--ink-3); border:1px solid var(--line); border-radius:999px;
+  padding:0 7px;}
+.toggle input{width:16px; height:16px; accent-color:var(--accent);}
+
+/* -- collections (read-only) -- */
+.coll{padding:.7rem 0; border-bottom:1px solid var(--line);}
+.coll:last-child{border-bottom:none;}
+.coll-head{display:flex; align-items:baseline; gap:.6rem;}
+.coll-name{font-size:14px;}
+.coll .muted{margin:.2rem 0 0;}
+.coll-evidence{font-size:12.5px; color:var(--ink-2); margin:.25rem 0 .5rem;}
+.coll-err{font-size:12.5px; color:var(--red); margin:.25rem 0 .5rem; overflow-wrap:anywhere;}
+.coll-rev{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+  color:var(--ink-3); margin:.45rem 0 0; overflow-wrap:anywhere;}
+
+footer{margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+  font-size:12px; color:var(--ink-3);}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px;
+  background:var(--card); border:1px solid var(--line); border-radius:4px; padding:0 4px;}

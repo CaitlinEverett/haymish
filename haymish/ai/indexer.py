@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -25,53 +27,72 @@ from ..hardware import recommended_caption_workers
 from . import ollama_client
 from .ollama_client import AIError
 
-# Bump when CAPTION_PROMPT changes materially. It's part of the caption's
-# identity in the catalog, so raising it makes existing captions read as stale
-# (doctor reports them; `index --reindex-captions` refreshes) rather than a
-# prompt change silently leaving a library described two different ways.
-CAPTION_PROMPT_VERSION = 2
+# Bump when CAPTION_PROMPT or metadata hints change materially. It's part of the
+# caption identity, so old and new descriptions never mix silently.
+CAPTION_PROMPT_VERSION = 6
 
-# Written as prose on purpose. A structured header (KIND:/SUBTYPE:/SENSITIVE:)
-# was tried and measured on a 4B model: it put FaceTime under "app", called a
-# photo of three people a "screenshot", ignored the supplied vocabulary, and
-# flagged SENSITIVE on 3 of 4 harmless images. Prose is fuzzy-matched by the
-# embedding, so a wrong word costs a little relevance; a structured field gets
-# queried as fact, so a wrong value is a lie. Meanwhile 99% of real captions
-# already open with the image kind ("photo", "screenshot", "receipt"), so that
-# signal is available without asking for a schema.
-#
-# The explicit asks below come from measuring the previous prompt over 1,215
-# real captions: it mentioned a video call in 1% and a web page in 1.8%, which
-# is why FaceTime stills and web screenshots were indistinguishable in search.
+# Prose remains deliberate: structured KIND/SENSITIVE fields made small models'
+# guesses look like facts. The p3 wording comes from the 2026-09-02 qwen3-vl:8b
+# pilot: it grounded all 18 outputs structurally but confused email vs chat,
+# named the wrong social platform twice, called one screenshot a photo, and may
+# have inferred a person's identity. p6 makes generation deterministic and
+# bounded, rejects empty output, removes invitations to guess social/person
+# identity, and uses Qwen's explicit /no_think control. Inference options are
+# part of the revision just like prompt wording.
 CAPTION_PROMPT = (
     "Describe this image in 1-2 short sentences for a photo search index. "
     "Begin with what kind of image it is: photo, screenshot, document, or receipt. "
-    "If it is a screenshot, say what it shows — a video call, a text message "
-    "conversation, a web page, a map, a receipt, a social media post, or an app. "
-    "Say whether people are visible and roughly how many. "
-    "Name any visible brand or product, and quote a few words of prominent text. "
+    "If it is a screenshot, distinguish a video call, text or chat conversation, "
+    "email, web page, map, receipt, social media post, app, or a displayed photo. "
+    "Say whether human figures are visible in the main content and roughly how many; "
+    "do not count tiny profile or avatar icons as people in the scene. "
+    "For social content, say social media post without guessing or naming the platform "
+    "from its layout or logo. Never identify or name a person; if a name is legible, "
+    "quote it only as visible text without asserting whose face is shown. Name another "
+    "app, brand, or product only when that exact name is clearly printed in the image. "
+    "Quote only a few useful words of prominent text. "
     "No preamble, just the description."
 )
 
 
-def caption_key(config) -> str:
+def caption_key(config: Config) -> str:
     """The identity a caption is stored under: the vision model plus the prompt
     version. Either changing means existing captions describe the library
     differently from new ones, which the catalog needs to be able to see."""
     return f"{config.ai_vision_model}+p{CAPTION_PROMPT_VERSION}"
 
-# An unattended overnight run must not grind through a whole library failing.
-# If the vision backend dies or hangs, every remaining caption raises, and
-# without this the run would "finish" hours later having captioned nothing --
-# the worst possible outcome, since it looks like work happened. Successes reset
-# the count, so ordinary intermittent failures never trip it.
-CONSECUTIVE_FAILURE_LIMIT = 25
+
+def caption_prompt(photo: object) -> str:
+    """Ground the model with cheap Photos metadata it should not second-guess."""
+    hints: list[str] = []
+    if getattr(photo, "screenshot", False):
+        hints.append(
+            "Apple Photos marks this asset as a screenshot. Call the asset a screenshot "
+            "even when most of it is a photograph. "
+        )
+    if getattr(photo, "ismovie", False):
+        hints.append("This image is a representative frame from a video. ")
+    return "/no_think\n" + "".join(hints) + CAPTION_PROMPT
+
+
+# Circuit breakers are deliberately smaller than a library run. The first real
+# qwen3-vl pilot returned success after 12/28 timeouts because the old threshold
+# was 25 and the whole 28-photo pool was one chunk. Bound both wasted time and
+# the amount of durable work between health decisions.
+CONSECUTIVE_FAILURE_LIMIT = 5
+RECENT_FAILURE_WINDOW = 8
+RECENT_FAILURE_LIMIT = 4
+FINAL_FAILURE_RATE_LIMIT = 0.25
+MAX_AUTO_CAPTION_WORKERS = 2
+CAPTION_TIMEOUT_SECONDS = 180
+CAPTION_GENERATION_OPTIONS: dict[str, int | float] = {
+    "temperature": 0,
+    "seed": 0,
+    "num_predict": 512,
+}
 
 EMBED_BATCH = 16
-# How many photos to caption before pausing to embed them. Small enough that an
-# interrupted multi-hour run loses little, big enough that embedding overhead
-# stays negligible against captioning cost.
-CHUNK = 32
+CHUNK = 8
 _MAX_TEXT_CHARS = 1500  # OCR text can be huge; embeddings don't need all of it
 
 
@@ -186,8 +207,13 @@ def caption_photo(config: Config, photo) -> str | None:
         return None
     image_bytes = Path(source).read_bytes()
     return ollama_client.generate(
-        config.ollama_host, config.ai_vision_model, CAPTION_PROMPT,
-        image_bytes=image_bytes, timeout=120,
+        config.ollama_host,
+        config.ai_vision_model,
+        caption_prompt(photo),
+        image_bytes=image_bytes,
+        think=False,
+        options=CAPTION_GENERATION_OPTIONS,
+        timeout=CAPTION_TIMEOUT_SECONDS,
     ).strip()
 
 
@@ -196,11 +222,11 @@ def vector_to_blob(vector: list[float]) -> tuple[bytes, int]:
     return arr.tobytes(), arr.shape[0]
 
 
-def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool = True,
+def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: bool = True,
                  limit: int | None = None, progress=None,
                  concurrency: int | None = None, plan=None) -> IndexStats:
     """Captions (optional) then embeddings, incremental against the catalog.
-    concurrency caps parallel caption requests; None auto-sizes to the machine.
+    concurrency caps parallel caption requests; None uses a conservative hardware cap.
     progress(done, total, phase) is called per photo for UI. plan(stats, total,
     config) is called once before any work, so a caller can report what is about
     to happen -- a run that turns out to have nothing to do should say so, not
@@ -223,17 +249,24 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     stats.needs_embedding = sum(1 for p in todo if p.uuid not in embedded)
     stats.needs_caption = (sum(1 for p in todo if p.uuid not in captioned) if captions else 0)
 
-    if captions:
-        vision_ok = ollama_client.model_available(config.ollama_host, config.ai_vision_model)
-        if not vision_ok:
-            stats.errors.append(
-                f"vision model {config.ai_vision_model!r} not available — captions skipped "
-                f"(index still built from Photos' own OCR text and labels). "
-                f"Fix: ollama pull {config.ai_vision_model}"
-            )
-            captions = False
+    if captions and stats.needs_caption and not ollama_client.model_available(
+        config.ollama_host, config.ai_vision_model
+    ):
+        raise AIError(
+            f"vision model {config.ai_vision_model!r} is not available — no captions "
+            f"were attempted. Pull it or explicitly use `haymish index --no-captions`."
+        )
 
-    workers = (concurrency or recommended_caption_workers()) if captions else 1
+    if concurrency is not None and concurrency < 1:
+        raise ValueError("caption concurrency must be at least 1")
+    if captions:
+        workers = (
+            concurrency
+            if concurrency is not None
+            else min(recommended_caption_workers(), MAX_AUTO_CAPTION_WORKERS)
+        )
+    else:
+        workers = 1
     stats.caption_workers = workers
 
     def caption_one(photo):
@@ -245,7 +278,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
         except AIError as e:
             return photo, None, e
 
-    def embed_chunk(chunk: list, recaptioned: set[str] | None = None) -> None:
+    def embed_chunk(chunk: list[Any], recaptioned: set[str] | None = None) -> None:
         """Embed and commit a slice, so searchability grows during the run.
 
         A photo already embedded gets re-embedded if it just received a caption:
@@ -278,6 +311,7 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
     started = time.monotonic()
     done = 0
     consecutive_failures = 0
+    recent_failures: deque[bool] = deque(maxlen=RECENT_FAILURE_WINDOW)
     try:
         for start in range(0, len(todo), CHUNK):
             chunk = todo[start:start + CHUNK]
@@ -285,14 +319,16 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
             if captions:
                 needs_caption = [p for p in chunk if p.uuid not in captioned]
                 if needs_caption:
-                    # Vision inference is the whole cost here and parallelizes well
-                    # on Apple Silicon (measured M4 Max: 5.7 s/photo sequential vs
-                    # 1.5 s/photo at 4-way). Workers only do HTTP; commits here.
+                    # Workers only perform HTTP. Catalog writes stay on this thread.
+                    # CHUNK bounds how many already-submitted calls can finish after
+                    # the health threshold is crossed.
+                    unhealthy: str | None = None
                     with ThreadPoolExecutor(max_workers=workers) as pool:
                         for photo, caption, error in pool.map(caption_one, needs_caption):
                             if error is not None:
                                 stats.caption_failed += 1
                                 consecutive_failures += 1
+                                recent_failures.append(True)
                                 log.failure(photo.uuid, error)
                                 if len(stats.errors) < 5:
                                     stats.errors.append(f"caption failed for {photo.uuid}: {error}")
@@ -303,20 +339,25 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
                                 fresh_captions.add(photo.uuid)
                                 stats.captioned += 1
                                 consecutive_failures = 0
+                                recent_failures.append(False)
 
-                    if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
-                        # Everything captioned so far is already committed, so
-                        # stopping here loses nothing and re-running resumes.
+                            if unhealthy is None and (
+                                consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT
+                                or (
+                                    len(recent_failures) == RECENT_FAILURE_WINDOW
+                                    and sum(recent_failures) >= RECENT_FAILURE_LIMIT
+                                )
+                            ):
+                                unhealthy = (
+                                    f"caption backend unhealthy: {consecutive_failures} consecutive "
+                                    f"failures and {sum(recent_failures)}/{len(recent_failures)} "
+                                    f"recent requests failed. Check `ollama ps` for contention, "
+                                    f"then re-run with `--concurrency 1`; completed chunks resume."
+                                )
+
+                    if unhealthy is not None:
                         embed_chunk(chunk, recaptioned=fresh_captions)
-                        message = (
-                            f"stopped after {consecutive_failures} consecutive caption "
-                            f"failures — the vision backend looks down. Check `ollama ps` "
-                            f"and that {config.ai_vision_model} is pulled, then re-run "
-                            f"`haymish index` to pick up where this left off "
-                            f"({stats.captioned:,} captioned before stopping)."
-                        )
-                        log.aborted(message)
-                        raise AIError(message)
+                        raise AIError(unhealthy)
             embed_chunk(chunk, recaptioned=fresh_captions)
             done += len(chunk)
             if progress:
@@ -328,6 +369,19 @@ def index_photos(config: Config, catalog: Catalog, photos: list, captions: bool 
         # fully usable -- captions and their embeddings land together per chunk.
         log.aborted(e)
         raise
+
+    caption_attempts = stats.captioned + stats.caption_failed
+    if (
+        caption_attempts
+        and stats.caption_failed / caption_attempts >= FINAL_FAILURE_RATE_LIMIT
+    ):
+        error = AIError(
+            f"caption run marked failed: {stats.caption_failed}/{caption_attempts} "
+            f"requests failed ({stats.caption_failed / caption_attempts:.0%}). "
+            f"Successful captions remain durable; inspect Ollama contention before retrying."
+        )
+        log.aborted(error)
+        raise error
 
     log.finish(stats, time.monotonic() - started)
     return stats

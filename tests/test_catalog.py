@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from haymish.catalog import Catalog, prompt_hash
 
 
@@ -29,6 +31,16 @@ def test_verdict_cache_roundtrips_detail(tmp_path: Path):
 
     miss = cat.get_verdict("u1", "ad-screenshots", prompt_hash("ollama", "gemma3:27b", "different"))
     assert miss is None
+    cat.close()
+
+
+def test_empty_caption_is_never_counted_as_completed_work(tmp_path: Path):
+    cat = Catalog(tmp_path / "catalog.db")
+
+    with pytest.raises(ValueError, match="empty caption"):
+        cat.put_caption("u1", "   ", "vision+p1")
+
+    assert cat.captioned_uuids("vision+p1") == set()
     cat.close()
 
 

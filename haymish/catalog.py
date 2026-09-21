@@ -13,6 +13,7 @@ import json
 import sqlite3
 import uuid as uuidlib
 
+from .incremental import EffectState, ObservationResult, ProcessorState
 from .paths import CATALOG_PATH, ensure_app_dirs
 
 SCHEMA = """
@@ -66,6 +67,30 @@ CREATE TABLE IF NOT EXISTS gallery_excluded(
   key TEXT NOT NULL, uuid TEXT NOT NULL, excluded_at TEXT,
   PRIMARY KEY(key, uuid)
 );
+CREATE TABLE IF NOT EXISTS observed_assets(
+  library_id TEXT NOT NULL, uuid TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, changed_at TEXT NOT NULL,
+  PRIMARY KEY(library_id, uuid)
+);
+CREATE TABLE IF NOT EXISTS processor_states(
+  library_id TEXT NOT NULL, uuid TEXT NOT NULL, processor_id TEXT NOT NULL,
+  processor_version TEXT NOT NULL, input_fingerprint TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'failed')),
+  error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY(
+    library_id, uuid, processor_id, processor_version, input_fingerprint
+  )
+);
+CREATE TABLE IF NOT EXISTS applied_effects(
+  library_id TEXT NOT NULL, uuid TEXT NOT NULL,
+  disposition_id TEXT NOT NULL, disposition_revision TEXT NOT NULL,
+  target_fingerprint TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'applied', 'verified', 'failed')),
+  error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY(
+    library_id, uuid, disposition_id, disposition_revision, target_fingerprint
+  )
+);
 """
 
 
@@ -92,24 +117,42 @@ class Catalog:
         self.db.executescript(SCHEMA)
         self._migrate()
 
-    def _migrate(self):
-        """Schema upgrades for catalogs created by older versions.
+    def _primary_key_columns(self, table: str) -> list[str]:
+        columns = self.db.execute(f"PRAGMA table_info({table})").fetchall()
+        keyed = sorted((column[5], column[1]) for column in columns if column[5])
+        return [name for _, name in keyed]
 
-        captions was originally PRIMARY KEY(uuid) -- one caption per photo, with
-        no way to tell which model wrote it. That made a vision-model upgrade
-        invisible: index would see "already captioned" and skip forever, quietly
-        serving stale captions. Now keyed by (uuid, model); existing rows keep
-        their recorded model (or 'unknown' if absent) so they show up as stale
-        rather than being silently trusted or silently destroyed.
+    def _migrate(self):
+        """Run every schema migration independently.
+
+        Do not return from this dispatcher just because one table is current: a
+        catalog can be current for captions and still need a later migration.
         """
-        cols = self.db.execute("PRAGMA table_info(captions)").fetchall()
-        if not cols:
-            return
-        pk_cols = [c[1] for c in cols if c[5]]  # c[5] = pk position, 0 when not pk
+        self._migrate_captions()
+        self._migrate_processor_states()
+
+    def _run_schema_migration(self, statements: str) -> None:
+        """Run a table rebuild atomically, including rollback on interruption.
+
+        ``executescript`` commits any pending transaction before it runs and does
+        not make the script atomic by itself. The explicit transaction keeps a
+        crash or SQL error between DROP and RENAME from losing the source table.
+        """
+        try:
+            self.db.executescript(f"BEGIN IMMEDIATE;\n{statements}\nCOMMIT;")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+
+    def _migrate_captions(self) -> None:
+        """Preserve model identity for captions created by older versions."""
+        pk_cols = self._primary_key_columns("captions")
         if pk_cols == ["uuid", "model"]:
             return
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS captions_new(
+        self._run_schema_migration("""
+            DROP TABLE IF EXISTS captions_new;
+            CREATE TABLE captions_new(
               uuid TEXT NOT NULL, caption TEXT, model TEXT NOT NULL, computed_at TEXT,
               PRIMARY KEY(uuid, model)
             );
@@ -119,10 +162,222 @@ class Catalog:
             DROP TABLE captions;
             ALTER TABLE captions_new RENAME TO captions;
         """)
-        self.db.commit()
+
+    def _migrate_processor_states(self) -> None:
+        """Make processor version and input fingerprint part of durable identity.
+
+        The first incremental schema kept only the latest row for a processor.
+        That contradicted the reuse contract: completing v2 destroyed proof that
+        the exact v1/input result had already completed. Preserve the legacy row
+        while widening the key so switching versions never erases reusable work.
+        """
+        expected = [
+            "library_id", "uuid", "processor_id", "processor_version",
+            "input_fingerprint",
+        ]
+        pk_cols = self._primary_key_columns("processor_states")
+        if pk_cols == expected:
+            return
+        legacy = ["library_id", "uuid", "processor_id"]
+        if pk_cols != legacy:
+            raise RuntimeError(
+                f"unsupported processor_states primary key: {pk_cols!r}"
+            )
+        self._run_schema_migration("""
+            DROP TABLE IF EXISTS processor_states_new;
+            CREATE TABLE processor_states_new(
+              library_id TEXT NOT NULL, uuid TEXT NOT NULL, processor_id TEXT NOT NULL,
+              processor_version TEXT NOT NULL, input_fingerprint TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'failed')),
+              error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              PRIMARY KEY(
+                library_id, uuid, processor_id, processor_version, input_fingerprint
+              )
+            );
+            INSERT INTO processor_states_new(
+              library_id, uuid, processor_id, processor_version, input_fingerprint,
+              state, error, created_at, updated_at
+            )
+            SELECT
+              library_id, uuid, processor_id, processor_version, input_fingerprint,
+              state, error, created_at, updated_at
+            FROM processor_states;
+            DROP TABLE processor_states;
+            ALTER TABLE processor_states_new RENAME TO processor_states;
+        """)
 
     def close(self):
         self.db.close()
+
+    # -- incremental processing --------------------------------------------
+    def observe_asset(
+        self, library_id: str, uuid: str, fingerprint: str
+    ) -> ObservationResult:
+        """Record an asset sighting and report how it compares with the last one."""
+        row = self.db.execute(
+            "SELECT fingerprint FROM observed_assets WHERE library_id=? AND uuid=?",
+            (library_id, uuid),
+        ).fetchone()
+        now = _now()
+        if row is None:
+            self.db.execute(
+                "INSERT INTO observed_assets("
+                "library_id, uuid, fingerprint, first_seen_at, last_seen_at, changed_at"
+                ") VALUES(?,?,?,?,?,?)",
+                (library_id, uuid, fingerprint, now, now, now),
+            )
+            result = ObservationResult.NEW
+        elif row[0] == fingerprint:
+            self.db.execute(
+                "UPDATE observed_assets SET last_seen_at=? "
+                "WHERE library_id=? AND uuid=?",
+                (now, library_id, uuid),
+            )
+            result = ObservationResult.UNCHANGED
+        else:
+            self.db.execute(
+                "UPDATE observed_assets "
+                "SET fingerprint=?, last_seen_at=?, changed_at=? "
+                "WHERE library_id=? AND uuid=?",
+                (fingerprint, now, now, library_id, uuid),
+            )
+            result = ObservationResult.CHANGED
+        self.db.commit()
+        return result
+
+    def processor_needs_work(
+        self,
+        library_id: str,
+        uuid: str,
+        processor_id: str,
+        processor_version: str,
+        input_fingerprint: str,
+    ) -> bool:
+        """Only an exact completed processor result is reusable."""
+        row = self.db.execute(
+            "SELECT 1 FROM processor_states "
+            "WHERE library_id=? AND uuid=? AND processor_id=? "
+            "AND processor_version=? AND input_fingerprint=? AND state=?",
+            (
+                library_id,
+                uuid,
+                processor_id,
+                processor_version,
+                input_fingerprint,
+                ProcessorState.COMPLETED.value,
+            ),
+        ).fetchone()
+        return row is None
+
+    def record_processor_state(
+        self,
+        library_id: str,
+        uuid: str,
+        processor_id: str,
+        processor_version: str,
+        input_fingerprint: str,
+        state: str | ProcessorState,
+        error: str | None = None,
+    ) -> None:
+        """Persist state for one exact processor version and input.
+
+        Completion is terminal for that identity. A caller that truly needs to
+        recompute must change the processor version or input fingerprint rather
+        than regressing durable completed work back to running after a retry race.
+        """
+        state = ProcessorState(state)
+        if state is not ProcessorState.FAILED:
+            error = None
+        now = _now()
+        self.db.execute(
+            "INSERT INTO processor_states("
+            "library_id, uuid, processor_id, processor_version, input_fingerprint, "
+            "state, error, created_at, updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT("
+            "library_id, uuid, processor_id, processor_version, input_fingerprint"
+            ") DO UPDATE SET "
+            "state=excluded.state, error=excluded.error, updated_at=excluded.updated_at "
+            "WHERE processor_states.state != 'completed' AND ("
+            "processor_states.state IS NOT excluded.state "
+            "OR processor_states.error IS NOT excluded.error) ",
+            (
+                library_id,
+                uuid,
+                processor_id,
+                processor_version,
+                input_fingerprint,
+                state.value,
+                error,
+                now,
+                now,
+            ),
+        )
+        self.db.commit()
+
+    def effect_is_satisfied(
+        self,
+        library_id: str,
+        uuid: str,
+        disposition_id: str,
+        disposition_revision: str,
+        target_fingerprint: str,
+    ) -> bool:
+        """Return whether the exact effect target was applied or verified."""
+        row = self.db.execute(
+            "SELECT 1 FROM applied_effects "
+            "WHERE library_id=? AND uuid=? AND disposition_id=? "
+            "AND disposition_revision=? AND target_fingerprint=? "
+            "AND state IN (?, ?)",
+            (
+                library_id,
+                uuid,
+                disposition_id,
+                disposition_revision,
+                target_fingerprint,
+                EffectState.APPLIED.value,
+                EffectState.VERIFIED.value,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def record_effect(
+        self,
+        library_id: str,
+        uuid: str,
+        disposition_id: str,
+        disposition_revision: str,
+        target_fingerprint: str,
+        state: str | EffectState,
+        error: str | None = None,
+    ) -> None:
+        """Persist an idempotent state transition for an exact effect target."""
+        state = EffectState(state)
+        now = _now()
+        self.db.execute(
+            "INSERT INTO applied_effects("
+            "library_id, uuid, disposition_id, disposition_revision, "
+            "target_fingerprint, state, error, created_at, updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT("
+            "library_id, uuid, disposition_id, disposition_revision, target_fingerprint"
+            ") DO UPDATE SET "
+            "state=excluded.state, error=excluded.error, updated_at=excluded.updated_at "
+            "WHERE applied_effects.state IS NOT excluded.state "
+            "OR applied_effects.error IS NOT excluded.error",
+            (
+                library_id,
+                uuid,
+                disposition_id,
+                disposition_revision,
+                target_fingerprint,
+                state.value,
+                error,
+                now,
+                now,
+            ),
+        )
+        self.db.commit()
 
     # -- runs ---------------------------------------------------------------
     def start_run(self, mode: str) -> str:
@@ -295,6 +550,9 @@ class Catalog:
         return row[0] if row else None
 
     def put_caption(self, uuid: str, caption: str, model: str):
+        caption = caption.strip()
+        if not caption:
+            raise ValueError("refusing to store an empty caption")
         self.db.execute(
             "INSERT OR REPLACE INTO captions VALUES(?,?,?,?)", (uuid, caption, model, _now())
         )

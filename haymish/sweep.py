@@ -33,12 +33,23 @@ _CLASSIFY_MODEL_FOR_HASH = {"apple": "vision-heuristic"}  # apple backend has no
 
 
 @dataclass
+class HidePreviewMeta:
+    """Per-rule hide stage counts for review UI / session payloads."""
+
+    due: int = 0
+    hideable: int = 0
+    skipped_icloud: int = 0
+    already_hidden: int = 0
+
+
+@dataclass
 class RuleOutcome:
     rule: str
     report_only: bool = False
     matched: int = 0
     filed: int = 0
     hidden: int = 0
+    hide_skipped_icloud: int = 0
     archived: int = 0
     staged_deletes: int = 0
     classify_errors: int = 0
@@ -67,6 +78,7 @@ class RulePreview:
     candidates: list  # actual Photo objects -- kept around so apply_confirmed can act on them directly
     preview_candidates: list[PreviewCandidate]
     errors: list[str] = field(default_factory=list)  # e.g. "no photos indexed yet — run haymish index"
+    hide_preview: HidePreviewMeta | None = None
 
 
 def _classify_model(config: Config, backend: str) -> str:
@@ -168,6 +180,35 @@ def _due(candidates: list, ages: dict, after_days: int) -> list:
     return [p for p in candidates if (ages.get(p.uuid) or 0) >= after_days]
 
 
+def partition_hide_due(candidates: list, ages: dict, after_days: int) -> tuple[list, HidePreviewMeta]:
+    """Split age-due hide candidates into hideable vs skipped (shared by preview and apply)."""
+    due = _due(candidates, ages, after_days)
+    hideable: list = []
+    skipped_icloud = 0
+    already_hidden = 0
+    for p in due:
+        if getattr(p, "hidden", False):
+            already_hidden += 1
+        elif getattr(p, "ismissing", False):
+            skipped_icloud += 1
+        elif library.photo_is_hideable(p):
+            hideable.append(p)
+    meta = HidePreviewMeta(
+        due=len(due),
+        hideable=len(hideable),
+        skipped_icloud=skipped_icloud,
+        already_hidden=already_hidden,
+    )
+    return hideable, meta
+
+
+def hide_preview_for_rule(rule: Rule, candidates: list, ages: dict) -> HidePreviewMeta | None:
+    if not rule.hide:
+        return None
+    _, meta = partition_hide_due(candidates, ages, rule.hide.after_days)
+    return meta
+
+
 def _apply_file_stage(rule: Rule, candidates: list, run_id: str, catalog: Catalog,
                        apply: bool, outcome: RuleOutcome) -> None:
     if not rule.file:
@@ -216,23 +257,13 @@ def _apply_hide_stage(rule: Rule, candidates: list, ages: dict, run_id: str,
                        catalog: Catalog, apply: bool, outcome: RuleOutcome) -> None:
     if not rule.hide:
         return
-    due = _due(candidates, ages, rule.hide.after_days)
-    # Already-hidden photos stay "due" forever (age only grows), so without this
-    # filter a photo would get a fresh "hide" action logged on every scheduled sweep
-    # -- and `undo` (defaulting to the most recent run) would then unhide a photo
-    # that was legitimately hidden long ago, not something this run actually did.
-    # Filtered before the dry-run branch too, so a dry run's count matches what
-    # --apply would actually do.
-    due = [p for p in due if not getattr(p, "hidden", False)]
-    # iCloud-only assets (osxphotos ismissing=True) can be hidden via PhotoKit, but
-    # afterwards fetchAssetsWithLocalIdentifiers often stops returning them — even
-    # with includeHiddenAssets — so undo/unhide fails. Skip until the original is
-    # local; safer than a hide we can't reverse programmatically.
-    missing = [p for p in due if getattr(p, "ismissing", False)]
-    due = [p for p in due if not getattr(p, "ismissing", False)]
-    if missing:
+    # Already-hidden / iCloud-only filtering happens in partition_hide_due so dry-run
+    # counts match --apply and preview banners stay aligned with the engine.
+    due, meta = partition_hide_due(candidates, ages, rule.hide.after_days)
+    outcome.hide_skipped_icloud = meta.skipped_icloud
+    if meta.skipped_icloud:
         outcome.action_errors.append(
-            f"{len(missing)} photo(s) skipped hide — originals not downloaded from iCloud "
+            f"{meta.skipped_icloud} photo(s) skipped hide — originals not downloaded from iCloud "
             f"(hide would succeed but unhide often cannot find them again)"
         )
     if not apply:
@@ -407,8 +438,11 @@ def preview_sweep(config: Config, catalog: Catalog, photosdb,
             )
             for p in candidates
         ]
+        ages = {p.uuid: library.photo_age_days(p, now) for p in candidates}
+        hide_preview = hide_preview_for_rule(rule, candidates, ages)
         previews.append(RulePreview(rule=rule, candidates=candidates,
-                                     preview_candidates=preview_candidates, errors=errors))
+                                     preview_candidates=preview_candidates, errors=errors,
+                                     hide_preview=hide_preview))
     return previews
 
 
