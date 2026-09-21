@@ -250,6 +250,41 @@ def check_backup(backup: Path | None, config=None) -> tuple[bool, str, str]:
     return False, "Backup volume", f"{backup} missing or not writable — archive/delete stages will skip"
 
 
+def propose_config_fixes(config) -> list[tuple[str, str, str]]:
+    """(toml_key, current_value, proposed_value) for fixable model-resolution issues.
+
+    Pure diagnostic: reads Ollama's model list and the config, proposes changes
+    the user can paste into rules.toml. Never writes anything itself — the CLI
+    prints the patch, and the human decides whether to apply it.
+    """
+    from .ai.model_resolve import resolve_model
+    from .ai.ollama_client import available_models, model_available
+
+    if not available_models(config.ollama_host):
+        return []
+
+    fixes: list[tuple[str, str, str]] = []
+
+    if not model_available(config.ollama_host, config.ollama_model):
+        resolved = resolve_model(config.ollama_host, config.ollama_model, "classify")
+        if model_available(config.ollama_host, resolved.model):
+            fixes.append(("[global.ollama].model", config.ollama_model, resolved.model))
+
+    role_map: list[tuple[str, str, str]] = [
+        ("ai_embed_model", "embed", "[global.ai].embed_model"),
+        ("ai_vision_model", "caption", "[global.ai].vision_model"),
+        ("ai_planner_model", "planner", "[global.ai].planner_model"),
+    ]
+    for attr, role, toml_key in role_map:
+        preferred = getattr(config, attr)
+        if not model_available(config.ollama_host, preferred):
+            resolved = resolve_model(config.ollama_host, preferred, role)
+            if model_available(config.ollama_host, resolved.model):
+                fixes.append((toml_key, preferred, resolved.model))
+
+    return fixes
+
+
 def run_all(config=None) -> list[tuple[bool, str, str]]:
     from .paths import DEFAULT_LIBRARY
 
