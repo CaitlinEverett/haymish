@@ -54,7 +54,8 @@ Pushed to `main`. Full suite green after these commits. Live Photos apply was no
 | Captions | `num_predict=1024`, retry on empty `length`, catch-up warns instead of aborting high rates |
 | Live tip | If catch-up stalls, `ollama ps` — stop large non-vision models hogging VRAM |
 
-**Watch:** `tail -f ~/.haymish/logs/reindex-catchup-*.log` and `cat ~/.haymish/jobs/reindex-status.json`
+**Watch (on your Mac):** `tail -f ~/.haymish/index.log` and `cat ~/.haymish/jobs/reindex-status.json`  
+Heuristics lens: `docs/HCI_HEURISTICS.md` (Atlas 2.5).
 
 ## Prior efficacy (already on main)
 

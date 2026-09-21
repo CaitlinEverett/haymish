@@ -77,6 +77,12 @@ Treat any multi-step task or external-agent run as a restartable workflow, not o
 5. Intent-aware duplicate/portrait/shoot workflows.
 6. Receipt extraction and professional tooling after core trust is measured.
 
+## Interaction heuristics
+
+UX and review-surface work follows `docs/HCI_HEURISTICS.md` (CS 6750 Atlas 2.5
+merged principles). Guidelines conflict; when they do, non-negotiable safety above
+wins. Cite the principle you optimized in the PR/review note.
+
 ## Terminology
 
 Prefer:
