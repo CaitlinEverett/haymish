@@ -224,7 +224,8 @@ def vector_to_blob(vector: list[float]) -> tuple[bytes, int]:
 
 def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: bool = True,
                  limit: int | None = None, progress=None,
-                 concurrency: int | None = None, plan=None) -> IndexStats:
+                 concurrency: int | None = None, plan=None,
+                 catch_up_captions: bool = False) -> IndexStats:
     """Captions (optional) then embeddings, incremental against the catalog.
     concurrency caps parallel caption requests; None uses a conservative hardware cap.
     progress(done, total, phase) is called per photo for UI. plan(stats, total,
@@ -241,7 +242,12 @@ def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: 
     # instead of silently reusing stale text forever.
     captioned = catalog.captioned_uuids(caption_key(config))
 
-    todo = [p for p in photos if p.uuid not in embedded or (captions and p.uuid not in captioned)]
+    if catch_up_captions:
+        if not captions:
+            raise ValueError("catch_up_captions requires captions enabled")
+        todo = [p for p in photos if p.uuid not in captioned]
+    else:
+        todo = [p for p in photos if p.uuid not in embedded or (captions and p.uuid not in captioned)]
     stats.already_indexed = len(photos) - len(todo)
     if limit is not None:
         todo = todo[:limit]
@@ -252,10 +258,47 @@ def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: 
     if captions and stats.needs_caption and not ollama_client.model_available(
         config.ollama_host, config.ai_vision_model
     ):
-        raise AIError(
-            f"vision model {config.ai_vision_model!r} is not available — no captions "
-            f"were attempted. Pull it or explicitly use `haymish index --no-captions`."
-        )
+        from .model_resolve import resolve_model
+        resolved = resolve_model(config.ollama_host, config.ai_vision_model, "caption")
+        if not ollama_client.model_available(config.ollama_host, resolved.model):
+            raise AIError(
+                f"vision model {config.ai_vision_model!r} is not available — no captions "
+                f"were attempted ({resolved.note}). Pull it or explicitly use "
+                f"`haymish index --no-captions`."
+            )
+        from dataclasses import replace
+        config = replace(config, ai_vision_model=resolved.model)
+        log._write(f"WARN  {resolved.note}")
+        # Recompute caption backlog under the effective model key.
+        captioned = catalog.captioned_uuids(caption_key(config))
+        if catch_up_captions:
+            todo = [p for p in photos if p.uuid not in captioned]
+        else:
+            todo = [p for p in photos if p.uuid not in embedded or p.uuid not in captioned]
+        if limit is not None:
+            todo = todo[:limit]
+        total = len(todo)
+        stats.needs_caption = sum(1 for p in todo if p.uuid not in captioned)
+        stats.needs_embedding = sum(1 for p in todo if p.uuid not in embedded)
+
+    if stats.needs_embedding and not ollama_client.model_available(
+        config.ollama_host, config.ai_embed_model
+    ):
+        from .model_resolve import resolve_model
+        embed_resolved = resolve_model(config.ollama_host, config.ai_embed_model, "embed")
+        if not ollama_client.model_available(config.ollama_host, embed_resolved.model):
+            raise AIError(
+                f"embed model {config.ai_embed_model!r} unavailable ({embed_resolved.note})"
+            )
+        from dataclasses import replace
+        config = replace(config, ai_embed_model=embed_resolved.model)
+        log._write(f"WARN  {embed_resolved.note}")
+        embedded = catalog.embedded_uuids(config.ai_embed_model)
+        todo = [p for p in photos if p.uuid not in embedded or (captions and p.uuid not in captioned)]
+        if limit is not None:
+            todo = todo[:limit]
+        total = len(todo)
+        stats.needs_embedding = sum(1 for p in todo if p.uuid not in embedded)
 
     if concurrency is not None and concurrency < 1:
         raise ValueError("caption concurrency must be at least 1")

@@ -53,7 +53,9 @@ def init(force: bool):
 
 
 @main.command()
-def doctor():
+@click.option("--fix", "fix_what", default=None, type=click.Choice(["index"]),
+              help="Attempt a safe auto-heal: `index` runs caption catch-up when freshness fails.")
+def doctor(fix_what):
     """Check permissions, library access, and backends."""
     from . import doctor as doc
 
@@ -69,6 +71,23 @@ def doctor():
         mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
         console.print(f" {mark} [bold]{label}[/bold] — {detail}")
         failed += 0 if ok else 1
+
+    if fix_what == "index" and config is not None:
+        console.print("\n[bold]Fixing index…[/bold] running `haymish index --catch-up-captions`")
+        ctx = click.get_current_context()
+        try:
+            ctx.invoke(index, no_captions=False, limit=None, concurrency=None,
+                       reindex_captions=False, rule_name=None, catch_up_captions=True)
+        except SystemExit as e:
+            if e.code not in (0, None):
+                raise
+        # Re-check freshness after heal
+        ok, label, detail = doc.check_index_freshness(config)
+        mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        console.print(f" {mark} [bold]{label}[/bold] — {detail}")
+        if ok:
+            failed = max(0, failed - 1)
+
     if failed:
         console.print(f"\n[red]{failed} check(s) need attention.[/red]")
         sys.exit(1)
@@ -477,6 +496,7 @@ def review(rule, no_open):
     from .catalog import Catalog
     from .library import load_photosdb
     from .review import run_review
+    from .server import daemon_url, ensure_daemon, read_state_file
 
     config = _load_config()
     known = {r.name for r in config.rules}
@@ -484,14 +504,34 @@ def review(rule, no_open):
         console.print(f"[red]Unknown rule:[/red] {rule!r}. Known rules: {sorted(known)}")
         sys.exit(1)
 
+    url = daemon_url()
+    if url is None:
+        try:
+            url, _token = ensure_daemon()
+        except RuntimeError:
+            url = None
+
+    if url is not None:
+        dash = url + "/"
+        console.print(f"Dashboard: [bold]{dash}[/bold]")
+        console.print(
+            "[dim]Click “Build review queue” in the Review section, then apply what you check. "
+            "The daemon keeps subgroups, jobs, and staged-delete visibility.[/dim]"
+        )
+        if not no_open:
+            import subprocess
+
+            subprocess.run(["open", dash], check=False)
+        return
+
     catalog = Catalog()
     with console.status("Loading Photos library (this can take a minute on large libraries)…"):
         photosdb = load_photosdb(config.library)
 
-    console.print("[dim]Matching rules and building thumbnails…[/dim]")
+    console.print("[dim]Daemon not running — using standalone review page…[/dim]")
 
-    def on_ready(url: str) -> None:
-        console.print(f"Review queue: [bold]{url}[/bold]")
+    def on_ready(review_url: str) -> None:
+        console.print(f"Review queue: [bold]{review_url}[/bold]")
         console.print("[dim]Uncheck false positives, then click Apply selected. Ctrl-C cancels.[/dim]")
 
     report = run_review(
@@ -521,12 +561,15 @@ def review(rule, no_open):
 @click.option("--reindex-captions", "reindex_captions", is_flag=True,
               help="Drop captions written by any other vision model first, so they're "
                    "regenerated with the model currently configured in rules.toml.")
+@click.option("--catch-up-captions", "catch_up_captions", is_flag=True,
+              help="Caption only photos missing a caption for the current vision model "
+                   "(skip photos that only need re-embedding).")
 @click.option("--rule", "rule_name", default=None, metavar="NAME",
               help="Only index photos matching this rule's query filters — e.g. "
                    "`--rule screenshots-general` captions just your screenshots. "
                    "Captioning a whole library takes many hours; this targets the "
                    "photos you actually need described.")
-def index(no_captions, limit, concurrency, reindex_captions, rule_name):
+def index(no_captions, limit, concurrency, reindex_captions, catch_up_captions, rule_name):
     """Build the AI index: a caption + embedding per photo, cached locally.
 
     Powers `haymish find`, `haymish ask`, and `semantic = {…}` rules. Incremental —
@@ -540,6 +583,11 @@ def index(no_captions, limit, concurrency, reindex_captions, rule_name):
 
     config = _load_config()
     catalog = Catalog()
+
+    if catch_up_captions and no_captions:
+        console.print("[red]Use either --catch-up-captions or --no-captions, not both.[/red]")
+        catalog.close()
+        sys.exit(1)
 
     if reindex_captions:
         from .ai.indexer import caption_key
@@ -566,6 +614,9 @@ def index(no_captions, limit, concurrency, reindex_captions, rule_name):
     hw = hardware.detect()
     if no_captions:
         console.print(f"{hw.describe()} — captions disabled (OCR text and labels only)")
+    elif catch_up_captions:
+        workers = concurrency or hardware.recommended_caption_workers(hw)
+        console.print(f"{hw.describe()} — catch-up captions only ({workers} at a time)")
     else:
         workers = concurrency or hardware.recommended_caption_workers(hw)
         console.print(f"{hw.describe()} — captioning {workers} at a time")
@@ -629,6 +680,7 @@ def index(no_captions, limit, concurrency, reindex_captions, rule_name):
 
         try:
             stats = index_photos(config, catalog, photos, captions=not no_captions,
+                                  catch_up_captions=catch_up_captions,
                                   limit=limit, progress=on_progress,
                                   concurrency=concurrency, plan=on_plan)
         except AIError as e:
@@ -658,6 +710,7 @@ def find(query, top_k, album_name, no_open):
     Read-only by default. With --album, matches open in the review UI so you
     confirm exactly which ones get filed.
     """
+    from .ai.indexer import caption_key
     from .ai.ollama_client import AIError
     from .ai.search import index_coverage, semantic_scores, top_matches
     from .catalog import Catalog
@@ -665,6 +718,46 @@ def find(query, top_k, album_name, no_open):
 
     config = _load_config()
     catalog = Catalog()
+
+    # Table mode: avoid loading the full PhotosDB — scores + catalog captions are enough.
+    if album_name is None:
+        try:
+            scores = semantic_scores(config, catalog, query)
+        except AIError as e:
+            console.print(f"[red]{e}[/red]")
+            catalog.close()
+            sys.exit(1)
+        if not scores:
+            console.print(
+                "[red]Nothing indexed yet — run `haymish index` first.[/red]"
+                if not catalog.embedded_uuids(config.ai_embed_model)
+                else "No matches."
+            )
+            catalog.close()
+            return
+
+        matches = top_matches(scores, top_k)
+        current_cap = caption_key(config)
+        missing_caption = 0
+        table = Table(title=f"find: {query!r}")
+        table.add_column("Score", justify="right")
+        table.add_column("UUID")
+        table.add_column("Caption / note")
+        for uuid, score in matches:
+            cap = catalog.get_caption(uuid, current_cap) or catalog.get_caption(uuid) or ""
+            if not catalog.get_caption(uuid, current_cap):
+                missing_caption += 1
+            table.add_row(f"{score:.3f}", uuid, (cap[:80] + "…") if len(cap) > 80 else cap or "—")
+        console.print(table)
+        if missing_caption:
+            console.print(
+                f"[yellow]{missing_caption}/{len(matches)} hit(s) lack a current vision caption "
+                f"({current_cap}) — matches may be OCR-heavy. "
+                f"Run `haymish index --catch-up-captions`.[/yellow]"
+            )
+        catalog.close()
+        return
+
     with console.status("Loading Photos library (this can take a minute on large libraries)…"):
         photosdb = load_photosdb(config.library)
         photos = all_photos(photosdb)
@@ -688,23 +781,6 @@ def find(query, top_k, album_name, no_open):
     matches = [(u, s) for u, s in top_matches(scores, top_k) if u in by_uuid]
     if not matches:
         console.print("No matches.")
-        catalog.close()
-        return
-
-    if album_name is None:
-        table = Table(title=f"Closest matches for {query!r}")
-        table.add_column("Score", justify="right")
-        table.add_column("File")
-        table.add_column("Date")
-        table.add_column("About")
-        for uuid, score in matches:
-            p = by_uuid[uuid]
-            caption = (catalog.get_caption(uuid) or "").replace("\n", " ")[:70]
-            date = getattr(p, "date", None)
-            table.add_row(f"{score:.2f}", p.original_filename,
-                          f"{date:%Y-%m-%d}" if date else "", caption)
-        console.print(table)
-        console.print("[dim]Add --album \"Some Album\" to file confirmed matches (opens review).[/dim]")
         catalog.close()
         return
 
@@ -790,15 +866,20 @@ def ask(request, save_name, no_open):
 
     if report is None:
         console.print("No photos matched (or you cancelled) — nothing applied.")
+        if save_name:
+            console.print(
+                f"[dim]Did not save rule {save_name!r} — --save only writes after a successful Apply.[/dim]"
+            )
     else:
         _print_sweep_report(report, apply_=True)
-
-    if save_name:
-        block = plan_to_toml(plan)
-        with open(config.source_path, "a") as f:
-            f.write("\n" + block)
-        console.print(f"[green]Saved[/green] rule [bold]{save_name}[/bold] to {config.source_path} — "
-                      f"it now runs in every sweep (edit or delete it there any time).")
+        if save_name:
+            block = plan_to_toml(plan)
+            with open(config.source_path, "a") as f:
+                f.write("\n" + block)
+            console.print(
+                f"[green]Saved[/green] rule [bold]{save_name}[/bold] to {config.source_path} — "
+                f"it now runs in every sweep (edit or delete it there any time)."
+            )
 
 
 @main.command("confirm-deletes")
@@ -1188,7 +1269,57 @@ def scheduled_run(ctx, force, no_index):
             return
 
     if not no_index:
-        ctx.invoke(index)
+        from .ai.ollama_client import AIError
+        from .paths import APP_DIR
+
+        try:
+            ctx.invoke(index)
+        except SystemExit as e:
+            # index() sys.exits(1) on AIError after printing — degrade to embed-only.
+            if e.code not in (0, None):
+                log_path = APP_DIR / "scheduler.log"
+                msg = (
+                    "index with captions failed; retrying embed-only (--no-captions) "
+                    "so find/semantic rules keep working overnight"
+                )
+                console.print(f"[yellow]{msg}[/yellow]")
+                try:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    with log_path.open("a") as f:
+                        f.write(msg + "\n")
+                except OSError:
+                    pass
+                try:
+                    ctx.invoke(
+                        index,
+                        no_captions=True,
+                        limit=None,
+                        concurrency=None,
+                        reindex_captions=False,
+                        catch_up_captions=False,
+                        rule_name=None,
+                    )
+                except SystemExit as e2:
+                    if e2.code not in (0, None):
+                        console.print(
+                            "[yellow]Embed-only index also failed — continuing to sweep "
+                            "with whatever index exists.[/yellow]"
+                        )
+            # successful exit falls through
+        except AIError as e:
+            console.print(f"[yellow]Index failed ({e}); retrying --no-captions…[/yellow]")
+            try:
+                ctx.invoke(
+                    index,
+                    no_captions=True,
+                    limit=None,
+                    concurrency=None,
+                    reindex_captions=False,
+                    catch_up_captions=False,
+                    rule_name=None,
+                )
+            except (SystemExit, AIError):
+                console.print("[yellow]Continuing to sweep without a fresh index.[/yellow]")
     ctx.invoke(sweep, rule=None, apply_=True)
 
 

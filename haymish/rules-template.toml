@@ -24,7 +24,9 @@ report_dir = "~/.haymish/reports"
 
 [global.ollama]
 host = "http://localhost:11434"
-model = "gemma3:4b"           # vision-capable and fast; any multimodal Ollama model works
+# Prefer a vision model you actually have pulled (examples: qwen3-vl:8b, gemma3:4b).
+# Runtime falls back to any local vision model if this tag is missing.
+model = "qwen3-vl:8b"
 
 [global.claude]
 model = "claude-sonnet-5"     # used only by rules with backend = "claude"; needs ANTHROPIC_API_KEY
@@ -32,9 +34,9 @@ model = "claude-sonnet-5"     # used only by rules with backend = "claude"; need
 [global.ai]
 # The AI index behind `haymish index` / `find` / `ask` and semantic rules.
 # All local via Ollama by default; nothing leaves this Mac.
-embed_model = "qwen3-embedding:8b"    # text embeddings for semantic search
-# vision_model = "gemma3:4b"          # captions; defaults to [global.ollama].model
-planner_model = "qwen3.6:27b"         # turns `haymish ask "..."` into a rule
+embed_model = "nomic-embed-text"      # fast; or qwen3-embedding:8b for higher quality
+# vision_model = "qwen3-vl:8b"        # captions; defaults to [global.ollama].model
+planner_model = "qwen3-vl:8b"         # any local text/vision model works; falls back if missing
 # planner_backend = "claude"          # opt-in: use the Claude API for planning instead
 
 # ---------------------------------------------------------------------------

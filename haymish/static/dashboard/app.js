@@ -36,20 +36,38 @@ async function api(path, body) {
 }
 
 // Start a job via POST, then poll /api/jobs/<id> until done/error.
+let jobInFlight = false;
+
 async function runJob(startPath, body, onProgress) {
-  const started = await api(startPath, body);
-  const jobId = started.job;
-  for (;;) {
-    await sleep(1500);
-    const j = await api('/api/jobs/' + encodeURIComponent(jobId));
-    if (onProgress) onProgress(j.progress || {});
-    if (j.state === 'done') return j.result;
-    if (j.state === 'error') throw new Error(j.error || 'job failed');
+  if (jobInFlight) throw new Error('Another job is already running — wait for it to finish.');
+  jobInFlight = true;
+  try {
+    const started = await api(startPath, body);
+    const jobId = started.job;
+    let delay = 600;
+    for (;;) {
+      await sleep(delay);
+      delay = Math.min(Math.round(delay * 1.6), 8000);
+      const j = await api('/api/jobs/' + encodeURIComponent(jobId));
+      if (onProgress) onProgress(j.progress || {});
+      if (j.state === 'done') return j.result;
+      if (j.state === 'error') {
+        const msg = (j.error && String(j.error).trim()) ? j.error : 'job failed';
+        throw new Error(msg);
+      }
+    }
+  } finally {
+    jobInFlight = false;
   }
 }
 
 function phaseText(p) {
   if (!p || !p.phase) return 'working…';
+  if (p.phase === 'applying' && p.rule) {
+    const base = 'Applying ' + p.rule;
+    if (p.total) return base + ' (' + (p.done || 0) + '/' + p.total + ')';
+    return base + '…';
+  }
   if (p.total) return p.phase + ' ' + (p.done || 0) + '/' + p.total;
   return p.phase + '…';
 }
@@ -100,7 +118,10 @@ function renderStatus(s) {
   const idx = $('chip-index');
   if (s.index && s.index.total != null) {
     const covered = s.index.covered || 0, total = s.index.total;
-    idx.textContent = 'Index ' + covered + '/' + total;
+    const captioned = s.index.captioned;
+    let label = 'Index ' + covered + '/' + total + ' embedded';
+    if (captioned != null) label += ' · ' + captioned + ' captioned';
+    idx.textContent = label;
     idx.className = 'chip ' + (covered === total ? 'green' : 'amber');
   } else if (s.library && s.library.error) {
     idx.textContent = 'Library failed to load';
@@ -151,7 +172,9 @@ $('chip-staged').addEventListener('click', async () => {
         rows.map(r =>
           '<tr><td><img src="/thumb/' + encodeURIComponent(r.uuid) + '" alt="" width="36" height="36" ' +
           'style="object-fit:cover;border-radius:4px;" onerror="this.remove()"></td>' +
-          '<td>' + esc(r.uuid) + '</td>' +
+          '<td>' + esc(r.filename || r.uuid) +
+          (r.filename && r.filename !== r.uuid
+            ? '<br><span class="muted">' + esc(r.uuid) + '</span>' : '') + '</td>' +
           '<td>' + esc(r.rule) + '</td>' +
           '<td>' + esc(r.staged_at) + '</td>' +
           '<td>' + (r.backed_up ? 'yes' : 'no') + '</td></tr>').join('') +
@@ -176,15 +199,45 @@ function noThumbTile() { return '<div class="no-thumb">no preview</div>'; }
 // into labelled clusters so one decision can cover hundreds of photos. Grouping
 // is a review convenience only -- the checkboxes stay the source of truth and
 // the apply payload is unchanged.
+const CARD_CAP = 48;
 const foldedGroups = new Set();   // "<rule>\n<groupKey>" for groups folded away
 const flatRules = new Set();      // rules the user switched back to a flat grid
+const expandedGrids = new Set();  // grid expand keys (rule or rule+group)
 let gridSeq = 0;                  // unique ids so fold buttons can aria-control
+
+function gridExpandKey(ruleName, groupKey) {
+  return groupKey != null ? ruleName + '\n' + groupKey : ruleName;
+}
+
+function doctorHintHtml() {
+  return '<p class="muted">Try <code>haymish doctor</code> for library and index health, ' +
+    'or run index catch-up if captions or embeddings are behind.</p>';
+}
+
+function emptyStateMessage(payload, rules) {
+  const state = payload.empty_state;
+  const hasErrors = rules.some(r => (r.errors || []).length);
+  if (state === 'all_rejected') {
+    return '<p class="muted"><strong>Everything here was previously rejected.</strong> ' +
+      'Unchecking in review remembers those photos for each rule — they will not reappear ' +
+      'until you clear rejections in the catalog.</p>' + doctorHintHtml();
+  }
+  if (state === 'errors' || hasErrors) {
+    return '<p class="muted"><strong>Rules could not produce a review queue.</strong> ' +
+      'See errors below — often the AI index is missing or Ollama is unreachable.</p>' +
+      doctorHintHtml();
+  }
+  return '<p class="muted"><strong>Nothing matched</strong> your enabled rules right now.</p>' +
+    doctorHintHtml();
+}
 
 function renderSession(payload) {
   currentSession = payload;
   foldedGroups.clear();
   flatRules.clear();
+  expandedGrids.clear();
   $('apply-outcome').innerHTML = '';
+  clearBanner('apply-session');
   const root = $('review-root');
 
   let html = '';
@@ -195,7 +248,7 @@ function renderSession(payload) {
   const hasCandidates = rules.some(r => (r.candidates || []).length);
   const hasErrors = rules.some(r => (r.errors || []).length);
   if (!rules.length || (!hasCandidates && !hasErrors)) {
-    root.innerHTML = html + '<p class="muted">Nothing matched.</p>';
+    root.innerHTML = html + emptyStateMessage(payload, rules);
     $('apply-bar').hidden = true;
     root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     return;
@@ -209,9 +262,23 @@ function renderSession(payload) {
     html += ruleSectionHtml(rule, null);
   }
   root.innerHTML = html;
+  // Subgroups start folded so large queues stay scannable.
+  root.querySelectorAll('.subgroup[data-fold-key]').forEach(sec => {
+    const key = sec.dataset.foldKey;
+    if (!key) return;
+    foldedGroups.add(key);
+    sec.dataset.folded = '1';
+    const grid = sec.querySelector('.grid');
+    if (grid) grid.hidden = true;
+    const foldBtn = sec.querySelector('[data-action="group-fold"]');
+    if (foldBtn) {
+      foldBtn.textContent = 'show group';
+      foldBtn.setAttribute('aria-expanded', 'false');
+    }
+  });
   $('apply-status').textContent = '';
   $('apply-btn').disabled = false;
-  $('apply-bar').hidden = false;
+  $('apply-bar').hidden = !hasCandidates;
   updateCount();
   root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -262,7 +329,7 @@ function candidateCardHtml(ruleName, c, picked) {
   const thumb = c.thumb
     ? '<img src="/thumb/' + encodeURIComponent(c.uuid) + '" alt="" loading="lazy">'
     : noThumbTile();
-  return '<label class="card">' +
+  return '<label class="card" tabindex="0">' +
     '<input type="checkbox" class="pick" data-rule="' + esc(ruleName) + '" data-uuid="' +
     esc(c.uuid) + '"' + (picked ? ' checked' : '') + '>' +
     '<div class="thumb">' + thumb + '</div>' +
@@ -272,15 +339,24 @@ function candidateCardHtml(ruleName, c, picked) {
     '</label>';
 }
 
-function gridHtml(ruleName, items, checkedMap, attrs) {
-  return '<div class="grid"' + (attrs || '') + '>' +
-    items.map(c => candidateCardHtml(ruleName, c, isPicked(checkedMap, c.uuid))).join('') +
+function gridHtml(ruleName, items, checkedMap, attrs, expandKey) {
+  const key = expandKey != null ? expandKey : gridExpandKey(ruleName, null);
+  const expanded = expandedGrids.has(key);
+  const shown = expanded ? items : items.slice(0, CARD_CAP);
+  let html = '<div class="grid"' + (attrs || '') + '>' +
+    shown.map(c => candidateCardHtml(ruleName, c, isPicked(checkedMap, c.uuid))).join('') +
     '</div>';
+  if (!expanded && items.length > shown.length) {
+    html += '<p class="grid-expand"><button type="button" class="link-btn" data-action="grid-expand" ' +
+      'data-expand-key="' + esc(key) + '">Show all ' + items.length + ' photos</button></p>';
+  }
+  return html;
 }
 
 function subgroupHtml(rule, group, checkedMap) {
   const foldKey = rule.name + '\n' + group.key;
   const folded = foldedGroups.has(foldKey);
+  const expandKey = gridExpandKey(rule.name, group.key);
   const gridId = 'rg-' + (++gridSeq);
   return '<section class="subgroup" data-folded="' + (folded ? '1' : '0') +
     '" data-fold-key="' + esc(foldKey) + '">' +
@@ -294,7 +370,8 @@ function subgroupHtml(rule, group, checkedMap) {
     '" aria-expanded="' + (folded ? 'false' : 'true') + '">' +
     (folded ? 'show group' : 'hide group') + '</button>' +
     '</div></div>' +
-    gridHtml(rule.name, group.items, checkedMap, ' id="' + gridId + '"' + (folded ? ' hidden' : '')) +
+    gridHtml(rule.name, group.items, checkedMap, ' id="' + gridId + '"' + (folded ? ' hidden' : ''),
+      expandKey) +
     '</section>';
 }
 
@@ -322,7 +399,14 @@ function ruleSectionHtml(rule, checkedMap) {
 
   const body = grouped
     ? groups.map(g => subgroupHtml(rule, g, checkedMap)).join('')
-    : gridHtml(rule.name, cands, checkedMap, '');
+    : gridHtml(rule.name, cands, checkedMap, '', gridExpandKey(rule.name, null));
+
+  const needGroupBanner = cands.length >= 24 && !(rule.subgroups || []).length;
+  const groupBanner = needGroupBanner
+    ? '<p class="rule-banner">Grouping unavailable — run ' +
+      '<code>haymish index --catch-up-captions</code> (or refresh index with captions) ' +
+      'so embeddings exist for clustering.</p>'
+    : '';
 
   return '<section class="rule-section" data-rule="' + esc(rule.name) + '">' +
     '<div class="rule-header"><div>' +
@@ -330,7 +414,7 @@ function ruleSectionHtml(rule, checkedMap) {
     '<p class="rule-meta">' + meta + '</p>' +
     errors.map(e => '<p class="rule-error">' + esc(e) + '</p>').join('') +
     '</div><div class="rule-actions">' + viewToggle + bulk + '</div></div>' +
-    body + '</section>';
+    groupBanner + body + '</section>';
 }
 
 function ruleSectionFor(name) {
@@ -399,15 +483,124 @@ $('review-root').addEventListener('click', e => {
     if (section) setRuleView(section.dataset.rule, btn.dataset.view);
     return;
   }
+  if (action === 'grid-expand') {
+    const key = btn.dataset.expandKey;
+    if (key) expandedGrids.add(key);
+    const section = btn.closest('.rule-section');
+    if (section && currentSession) {
+      setRuleView(section.dataset.rule,
+        flatRules.has(section.dataset.rule) ? 'flat' : 'grouped');
+    }
+    return;
+  }
   // Rule-level bulk select still reaches every card, grouped or flat.
   const checked = action === 'select-all';
   btn.closest('.rule-section').querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
   updateCount();
 });
 
+function reviewSelectionTotals() {
+  let selected = 0;
+  let rejects = 0;
+  for (const rule of (currentSession && currentSession.rules) || []) {
+    const total = (rule.candidates || []).length;
+    if (!total) continue;
+    const sel = $('review-root').querySelectorAll('.pick:checked').length
+      ? Array.from($('review-root').querySelectorAll('.pick:checked'))
+        .filter(cb => cb.dataset.rule === rule.name).length
+      : 0;
+    selected += sel;
+    rejects += total - sel;
+  }
+  return { selected, rejects };
+}
+
+function isSessionExpiredError(msg) {
+  const m = String(msg || '').toLowerCase();
+  return m.includes('expired session') || m.includes('unknown or expired session')
+    || m.includes('unknown session');
+}
+
+function offerRebuildQueue(message) {
+  const holder = $('banners');
+  const key = 'apply-session';
+  let div = holder.querySelector('[data-key="' + key + '"]');
+  if (!div) {
+    div = document.createElement('div');
+    div.className = 'banner';
+    div.dataset.key = key;
+    div.setAttribute('role', 'alert');
+    holder.appendChild(div);
+  }
+  div.innerHTML = '';
+  const span = document.createElement('span');
+  span.className = 'msg';
+  span.textContent = message;
+  const rebuild = document.createElement('button');
+  rebuild.type = 'button';
+  rebuild.className = 'link-btn';
+  rebuild.textContent = 'Rebuild queue';
+  rebuild.addEventListener('click', () => { div.remove(); rebuildReviewQueue(); });
+  const dismiss = document.createElement('button');
+  dismiss.className = 'dismiss';
+  dismiss.type = 'button';
+  dismiss.textContent = '✕';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.addEventListener('click', () => div.remove());
+  div.append(span, rebuild, dismiss);
+}
+
+async function rebuildReviewQueue() {
+  const prog = $('review-progress');
+  prog.textContent = 'starting…';
+  try {
+    const result = await runJob('/api/review/build', {},
+      p => { prog.textContent = phaseText(p); });
+    prog.textContent = '';
+    renderSession(result);
+  } catch (err) {
+    prog.textContent = '';
+    banner('Review build failed: ' + err.message);
+  }
+}
+
+const REVIEW_CONTROL = 'input, button, label, select, textarea, a';
+
+$('review-root').addEventListener('keydown', e => {
+  if (e.target.closest('input[type="text"], textarea')) return;
+  const card = e.target.closest('label.card');
+  if (e.key === ' ' || e.key === 'Spacebar') {
+    if (e.target.closest(REVIEW_CONTROL) && !card) return;
+    if (card) {
+      e.preventDefault();
+      const cb = card.querySelector('.pick');
+      if (cb) { cb.checked = !cb.checked; updateCount(); }
+      return;
+    }
+  }
+  if (e.key !== 'a' && e.key !== 'n') return;
+  if (e.target.closest(REVIEW_CONTROL)) return;
+  const scope = card
+    ? (card.closest('.subgroup') || card.closest('.rule-section'))
+    : (document.activeElement && document.activeElement.closest('.subgroup, .rule-section'));
+  if (!scope) return;
+  e.preventDefault();
+  const checked = e.key === 'a';
+  scope.querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
+  updateCount();
+});
+
 $('apply-btn').addEventListener('click', async () => {
-  if (!currentSession) return;
+  if (!currentSession || jobInFlight) return;
   const btn = $('apply-btn'), status = $('apply-status');
+  const totals = reviewSelectionTotals();
+  const impact = totals.selected + totals.rejects;
+  if (impact > 200) {
+    const ok = window.confirm(
+      'Apply will act on ' + totals.selected + ' selected photo(s) and record ' +
+      totals.rejects + ' rejection(s) (' + impact + ' total). Continue?');
+    if (!ok) return;
+  }
   // Every rule in the session is submitted, so unchecked candidates get recorded
   // as rejections even when a whole rule is deselected.
   const selections = {};
@@ -430,7 +623,11 @@ $('apply-btn').addEventListener('click', async () => {
   } catch (e) {
     status.textContent = '';
     btn.disabled = false;
-    banner('Apply failed: ' + e.message);
+    if (isSessionExpiredError(e.message)) {
+      offerRebuildQueue('Apply failed — review session expired. Rebuild the queue and try again.');
+    } else {
+      banner('Apply failed: ' + e.message);
+    }
   }
 });
 
@@ -444,6 +641,7 @@ function renderApplyOutcome(result) {
     if (o.hidden) bits.push(o.hidden + ' hidden');
     if (o.archived) bits.push(o.archived + ' archived');
     if (o.staged_deletes) bits.push(o.staged_deletes + ' staged for delete');
+    if (o.rejected) bits.push(o.rejected + ' rejected');
     html += '<li><strong>' + esc(o.rule) + '</strong> — ' +
       (bits.length ? esc(bits.join(' · ')) : 'no actions taken') +
       ((o.errors && o.errors.length)
@@ -543,17 +741,11 @@ $('album-form').addEventListener('submit', async e => {
 // ---- Build review queue ----------------------------------------------------
 
 $('build-btn').addEventListener('click', async () => {
-  const btn = $('build-btn'), prog = $('review-progress');
+  const btn = $('build-btn');
+  if (jobInFlight) return;
   btn.disabled = true;
-  prog.textContent = 'starting…';
   try {
-    const result = await runJob('/api/review/build', {},
-      p => { prog.textContent = phaseText(p); });
-    prog.textContent = '';
-    renderSession(result);
-  } catch (err) {
-    prog.textContent = '';
-    banner('Review build failed: ' + err.message);
+    await rebuildReviewQueue();
   } finally {
     btn.disabled = false;
   }
@@ -1125,13 +1317,30 @@ refreshCollections();
 
 // ---- Index -----------------------------------------------------------------
 
+const indexCatchUp = $('index-catch-up');
+const indexNoCaptions = $('index-no-captions');
+if (indexCatchUp && indexNoCaptions) {
+  indexCatchUp.addEventListener('change', () => {
+    if (indexCatchUp.checked) indexNoCaptions.checked = false;
+  });
+  indexNoCaptions.addEventListener('change', () => {
+    if (indexNoCaptions.checked) indexCatchUp.checked = false;
+  });
+}
+
 $('index-btn').addEventListener('click', async () => {
   const btn = $('index-btn'), prog = $('index-progress');
+  if (jobInFlight) return;
   btn.disabled = true;
   prog.textContent = 'starting…';
   $('index-result').innerHTML = '';
+  const body = {
+    catch_up_captions: !!(indexCatchUp && indexCatchUp.checked),
+    no_captions: !!(indexNoCaptions && indexNoCaptions.checked),
+    captions: !(indexNoCaptions && indexNoCaptions.checked),
+  };
   try {
-    const r = await runJob('/api/index/build', { captions: true },
+    const r = await runJob('/api/index/build', body,
       p => { prog.textContent = phaseText(p); });
     prog.textContent = '';
     const bits = [];

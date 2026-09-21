@@ -302,11 +302,21 @@ def _hide_preview_json(meta: HidePreviewMeta | None) -> dict | None:
     }
 
 
+def _review_empty_state(previews) -> str | None:
+    """Why the review grid has no checkboxes — distinct messages in the dashboard."""
+    if any(rp.candidates for rp in previews):
+        return None
+    if any(rp.errors for rp in previews):
+        return "errors"
+    return "zero_matches"
+
+
 def _session_payload(session_id: str, session: dict) -> dict:
     subgroups = session.get("subgroups") or {}
-    return {
+    payload = {
         "session": session_id,
         "plan": session.get("plan"),
+        "empty_state": session.get("empty_state"),
         "rules": [
             {
                 "name": rp.rule.name,
@@ -329,6 +339,7 @@ def _session_payload(session_id: str, session: dict) -> dict:
             for rp in session["previews"]
         ],
     }
+    return payload
 
 
 def _build_previews_session(state: ServeState, job: Job, rules_override=None,
@@ -357,8 +368,23 @@ def _build_previews_session(state: ServeState, job: Job, rules_override=None,
     job.progress = {"phase": "grouping"}
     subgroups = _subgroups_for(state, previews)
 
+    empty_state = _review_empty_state(previews)
+    if empty_state == "zero_matches":
+        probe_catalog = Catalog()
+        try:
+            probe = [rp for rp in preview_sweep(state.config, probe_catalog, photosdb,
+                                                 rule_names=rule_names,
+                                                 rules_override=rules_override,
+                                                 honor_rejects=False)
+                     if rp.candidates or rp.errors]
+        finally:
+            probe_catalog.close()
+        if any(rp.candidates for rp in probe):
+            empty_state = "all_rejected"
+
     session_id = state.put_session(previews, plan=plan)
     state.sessions[session_id]["subgroups"] = subgroups
+    state.sessions[session_id]["empty_state"] = empty_state
     return _session_payload(session_id, state.sessions[session_id])
 
 
@@ -472,8 +498,15 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             catalog = Catalog()
             try:
                 rows = catalog.list_staged_deletes()
+                by_uuid = None
+                if state.photosdb is not None:
+                    by_uuid = {p.uuid: p for p in library.all_photos(state.photosdb)}
                 for row in rows:
                     row["backed_up"] = catalog.is_archived_and_verified(row["uuid"])
+                    if by_uuid is not None:
+                        photo = by_uuid.get(row["uuid"])
+                        if photo is not None:
+                            row["filename"] = getattr(photo, "original_filename", None) or row["uuid"]
             finally:
                 catalog.close()
             self._json({"staged": rows,
@@ -492,6 +525,9 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             embedded = catalog.embedded_uuids(state.config.ai_embed_model)
             run_id = catalog.last_run_id()
             caption_models = catalog.caption_models()
+            from .ai.indexer import caption_key
+
+            captioned = len(catalog.captioned_uuids(caption_key(state.config)))
         finally:
             catalog.close()
 
@@ -502,6 +538,7 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
         # stale because catalog keys look like "model+p2".
         index = {
             "embedded": len(embedded),
+            "captioned": captioned,
             "caption_models": caption_models,
             "stale_captions": _stale_caption_count(state.config, caption_models),
         }
@@ -616,12 +653,23 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             def run(job: Job):
                 catalog = Catalog()
                 try:
-                    report = apply_confirmed(state.config, catalog, session["previews"], selections)
+                    def progress(done, total, rule_name):
+                        job.progress = {
+                            "phase": "applying",
+                            "done": done,
+                            "total": total,
+                            "rule": rule_name,
+                        }
+
+                    report = apply_confirmed(
+                        state.config, catalog, session["previews"], selections,
+                        progress=progress,
+                    )
                 finally:
                     catalog.close()
                 return {"run_id": report.run_id,
-                        "outcomes": [{"rule": o.rule, "matched": o.matched, "filed": o.filed,
-                                       "hidden": o.hidden, "archived": o.archived,
+                        "outcomes": [{"rule": o.rule, "matched": o.matched, "rejected": o.rejected,
+                                       "filed": o.filed, "hidden": o.hidden, "archived": o.archived,
                                        "staged_deletes": o.staged_deletes,
                                        "errors": o.action_errors}
                                       for o in report.outcomes]}
@@ -783,7 +831,10 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             self._json({"job": job.id})
 
         elif path == "/api/index/build":
-            captions = bool(body.get("captions", True))
+            catch_up = bool(body.get("catch_up_captions"))
+            captions = False if body.get("no_captions") else bool(body.get("captions", True))
+            if catch_up:
+                captions = True
             limit = body.get("limit")
             concurrency = body.get("concurrency")
 
@@ -798,6 +849,7 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
 
                     stats = index_photos(state.config, catalog, library.all_photos(photosdb),
                                           captions=captions,
+                                          catch_up_captions=catch_up,
                                           limit=int(limit) if limit else None,
                                           progress=progress,
                                           concurrency=int(concurrency) if concurrency else None)

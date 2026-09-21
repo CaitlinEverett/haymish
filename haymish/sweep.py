@@ -52,6 +52,7 @@ class RuleOutcome:
     hide_skipped_icloud: int = 0
     archived: int = 0
     staged_deletes: int = 0
+    rejected: int = 0
     classify_errors: int = 0
     action_errors: list[str] = field(default_factory=list)
 
@@ -397,7 +398,8 @@ def _select_and_classify(rule: Rule, photos: list, by_uuid: dict, now, config: C
 
 def preview_sweep(config: Config, catalog: Catalog, photosdb,
                    rule_names: list[str] | None = None,
-                   rules_override: list[Rule] | None = None) -> list[RulePreview]:
+                   rules_override: list[Rule] | None = None,
+                   honor_rejects: bool = True) -> list[RulePreview]:
     """The query -> exclude -> semantic -> classify phase only, with per-photo
     detail, for the `haymish review` browser UI to render before anything is
     actually applied. Report-only rules (nothing to confirm -- they never act) and
@@ -413,7 +415,7 @@ def preview_sweep(config: Config, catalog: Catalog, photosdb,
         if rule.report_only or not (rule.file or rule.hide or rule.archive or rule.delete):
             continue
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
-        rejected = catalog.rejected_uuids_for_rule(rule.name)
+        rejected = catalog.rejected_uuids_for_rule(rule.name) if honor_rejects else set()
         detail: dict[str, str] = {}
         candidates = _select_and_classify(rule, photos, by_uuid, now, config, catalog, claimed,
                                            outcome, detail_out=detail, extra_exclude=rejected)
@@ -492,7 +494,8 @@ def run_sweep(config: Config, catalog: Catalog, photosdb, rule_names: list[str] 
 
 
 def apply_confirmed(config: Config, catalog: Catalog, previews: list[RulePreview],
-                     selections: dict[str, set[str]]) -> SweepReport:
+                     selections: dict[str, set[str]],
+                     progress=None) -> SweepReport:
     """The other half of `haymish review`: given preview_sweep's candidates and which
     uuids the user actually checked, act on exactly that subset -- via the SAME
     per-stage functions run_sweep --apply uses, so there's no separate code path that
@@ -502,16 +505,19 @@ def apply_confirmed(config: Config, catalog: Catalog, previews: list[RulePreview
     run_id = catalog.start_run("review-apply")
 
     outcomes: list[RuleOutcome] = []
-    for rp in previews:
+    total_rules = len(previews)
+    for i, rp in enumerate(previews):
         rule = rp.rule
         confirmed_uuids = selections.get(rule.name, set())
         confirmed = [p for p in rp.candidates if p.uuid in confirmed_uuids]
+        rejected_n = len(rp.candidates) - len(confirmed)
         for p in rp.candidates:
             if p.uuid not in confirmed_uuids:
                 catalog.reject_candidate(p.uuid, rule.name)
 
         outcome = RuleOutcome(rule=rule.name, report_only=rule.report_only)
         outcome.matched = len(confirmed)
+        outcome.rejected = rejected_n
         if confirmed:
             ages = {p.uuid: library.photo_age_days(p, now) for p in confirmed}
             _apply_file_stage(rule, confirmed, run_id, catalog, True, outcome)
@@ -519,6 +525,8 @@ def apply_confirmed(config: Config, catalog: Catalog, previews: list[RulePreview
             _apply_archive_stage(rule, confirmed, ages, run_id, config, catalog, True, outcome)
             _apply_delete_stage(rule, confirmed, ages, run_id, catalog, True, outcome)
         outcomes.append(outcome)
+        if progress is not None:
+            progress(i + 1, total_rules, rule.name)
 
     catalog.finish_run(run_id, {
         "apply": True,

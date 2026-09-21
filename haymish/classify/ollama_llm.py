@@ -53,11 +53,20 @@ def classify(photo, prompt: str, config) -> ClassifyResult:
     image_bytes = _read_as_jpeg_bytes(path)
     b64 = base64.b64encode(image_bytes).decode("ascii")
 
+    from ..ai.model_resolve import resolve_model
+    from ..ai.ollama_client import model_available
+
+    resolved = resolve_model(config.ollama_host, config.ollama_model, "classify")
+    if not model_available(config.ollama_host, resolved.model):
+        raise ClassifyError(
+            f"vision model {config.ollama_model!r} unavailable ({resolved.note})"
+        )
+
     try:
         response = httpx.post(
             f"{config.ollama_host}/api/generate",
             json={
-                "model": config.ollama_model,
+                "model": resolved.model,
                 "prompt": prompt,
                 "images": [b64],
                 "stream": False,

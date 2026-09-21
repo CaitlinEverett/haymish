@@ -275,6 +275,11 @@ class _ReviewHandler(http.server.BaseHTTPRequestHandler):
             self._send(400, "text/plain", b"bad request")
             return
 
+        # Every rule in the session must be represented: a missing rule means the
+        # user left nothing checked, so every preview candidate is a rejection.
+        for rp in self.previews:
+            selections.setdefault(rp.rule.name, set())
+
         report = apply_confirmed(self.config, self.catalog, self.previews, selections)
         self.result_holder["report"] = report
         self._send(200, "application/json",

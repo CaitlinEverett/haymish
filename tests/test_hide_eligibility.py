@@ -33,7 +33,7 @@ def test_partition_hide_due_counts():
     assert meta == HidePreviewMeta(due=3, hideable=1, skipped_icloud=1, already_hidden=1)
 
 
-def test_apply_hide_stage_dry_run_sets_counters(monkeypatch):
+def test_apply_hide_stage_dry_run_sets_counters(monkeypatch, tmp_path):
     from haymish import sweep as sweep_mod
     from haymish.catalog import Catalog
 
@@ -41,7 +41,7 @@ def test_apply_hide_stage_dry_run_sets_counters(monkeypatch):
     candidates = [_photo("a"), _photo("b", ismissing=True)]
     ages = {"a": 0, "b": 0}
     outcome = sweep_mod.RuleOutcome(rule="t")
-    catalog = Catalog()
+    catalog = Catalog(tmp_path / "catalog.db")
     try:
         monkeypatch.setattr(sweep_mod.hide_action, "hide_photos", lambda uuids: {})
         sweep_mod._apply_hide_stage(rule, candidates, ages, "run", catalog, False, outcome)

@@ -113,6 +113,10 @@
   <section class="block">
     <h2>Index</h2>
     <p class="sub">Embeddings and captions power Ask and Find.</p>
+    <div class="index-options">
+      <label class="toggle"><input type="checkbox" id="index-catch-up"> Catch-up captions only</label>
+      <label class="toggle"><input type="checkbox" id="index-no-captions"> Skip captions (embed only)</label>
+    </div>
     <button class="secondary" id="index-btn" type="button">Refresh index</button>
     <p class="progress" id="index-progress"></p>
     <div id="index-result"></div>
@@ -122,7 +126,7 @@
 </div>
 
 <div class="bar" id="apply-bar" hidden>
-  <span class="count"><span id="sel-count">0</span> selected</span>
+  <span class="count"><span id="sel-count" aria-live="polite" aria-atomic="true">0</span> selected</span>
   <span class="hint">Unchecked photos won't be suggested again for that rule.</span>
   <span class="status" id="apply-status"></span>
   <button class="action" id="apply-btn" type="button">Apply selected</button>

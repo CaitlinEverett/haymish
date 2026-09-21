@@ -11,13 +11,25 @@ import platform
 import shutil
 from pathlib import Path
 
-import httpx
+VISION_MODEL_MARKERS = (
+    "gemma3", "qwen2.5vl", "qwen3-vl", "llava", "llama3.2-vision", "minicpm-v", "moondream",
+)
 
-VISION_MODEL_MARKERS = ("gemma3", "qwen2.5vl", "qwen3-vl", "llava", "llama3.2-vision", "minicpm-v", "moondream")
+_BUNDLE_HINTS = {
+    "com.apple.Terminal": "Terminal",
+    "com.googlecode.iterm2": "iTerm",
+    "com.todesktop.230313mzl4w4u92": "Cursor",
+    "com.microsoft.VSCode": "VS Code",
+}
 
 
 def host_app_hint() -> str:
     """Human label for the host that launched haymish (for TCC settings paths)."""
+    bundle = os.environ.get("__CFBundleIdentifier", "")
+    if bundle in _BUNDLE_HINTS:
+        return _BUNDLE_HINTS[bundle]
+    if bundle:
+        return bundle
     term = os.environ.get("TERM_PROGRAM", "")
     hints = {"Apple_Terminal": "Terminal", "iTerm.app": "iTerm", "vscode": "Cursor / VS Code"}
     return hints.get(term, "the app you run haymish from (Terminal / iTerm / Cursor)")
@@ -26,7 +38,7 @@ def host_app_hint() -> str:
 def photokit_access_fix_hint() -> str:
     return (
         f"System Settings → Privacy & Security → Photos → allow Full Access for "
-        f"{host_app_hint()}"
+        f"{host_app_hint()}, then quit and reopen that app"
     )
 
 
@@ -78,12 +90,20 @@ def check_photokit_auth() -> tuple[bool, str, str]:
         )
         names = {0: "not requested yet", 1: "restricted", 2: "denied", 3: "authorized", 4: "limited"}
         label = names.get(status, str(status))
+        host = host_app_hint()
         if status == 3:
-            return True, "PhotoKit access (hide/delete)", label
+            return True, "PhotoKit access (hide/delete)", f"{label} ({host})"
         if status == 0:
-            return True, "PhotoKit access (hide/delete)", "not requested yet — first hide/delete will prompt"
+            return True, "PhotoKit access (hide/delete)", (
+                f"not requested yet for {host} — first hide/delete will prompt "
+                f"(prefer Terminal.app if Cursor/IDE already shows Denied)"
+            )
+        if status == 4:
+            return False, "PhotoKit access (hide/delete)", (
+                f"limited — hide/delete need Full Access. Fix: {photokit_access_fix_hint()}"
+            )
         return False, "PhotoKit access (hide/delete)", (
-            f"{label}. Fix: {photokit_access_fix_hint()}"
+            f"{label} for {host}. Fix: {photokit_access_fix_hint()}"
         )
     except Exception as e:
         return False, "PhotoKit access (hide/delete)", f"pyobjc Photos framework unavailable: {e}"
@@ -97,41 +117,62 @@ def check_automation() -> tuple[bool, str, str]:
 
 def check_ollama(host: str, model: str) -> tuple[bool, str, str]:
     from .ai.ollama_client import available_models, model_available
+    from .ai.model_resolve import resolve_model
 
     models = available_models(host)
     if not models:
-        return False, "Ollama", f"not reachable at {host} — LLM rules will be skipped"
-    # Exact-tag check: gemma3:27b pointing at a machine that only has gemma3:4b
-    # must fail here, not 404 mid-sweep.
+        return False, "Ollama (classify)", f"not reachable at {host} — LLM rules will be skipped"
     if model_available(host, model):
-        return True, "Ollama", f"{model} available"
+        return True, "Ollama (classify)", f"{model} available"
+    resolved = resolve_model(host, model, "classify")
     vision = sorted(m for m in models if any(v in m for v in VISION_MODEL_MARKERS))
-    return False, "Ollama", (
+    if model_available(host, resolved.model):
+        return False, "Ollama (classify)", (
+            f"{model} not pulled; runtime will fall back to {resolved.model}. "
+            f"Vision models present: {vision or 'none'} — "
+            f"`ollama pull {model}` or point [global.ollama].model at one of those."
+        )
+    return False, "Ollama (classify)", (
         f"{model} not pulled. Vision-capable models present: {vision or 'none'} — "
         f"`ollama pull {model}` or point [global.ollama].model at one of those."
     )
 
 
 def check_ai_index(config) -> tuple[bool, str, str]:
-    """Embedding + planner models for `haymish index/find/ask` and semantic rules."""
-    from .ai.ollama_client import available_models
+    """Embedding + planner + vision models for `haymish index/find/ask`."""
+    from .ai.ollama_client import available_models, model_available
+    from .ai.model_resolve import resolve_model
 
     models = available_models(config.ollama_host)
     if not models:
         return False, "AI index (ask/find)", (
             f"Ollama not reachable at {config.ollama_host} — index/find/ask unavailable"
         )
-    missing = [m for m in (config.ai_embed_model, config.ai_planner_model)
-               if m not in models and m.split(":")[0] not in models]
-    if missing:
+
+    roles = [
+        ("embed", config.ai_embed_model, "embed"),
+        ("planner", config.ai_planner_model, "planner"),
+        ("vision", config.ai_vision_model, "caption"),
+    ]
+    parts = []
+    missing_hard = []
+    for label, preferred, role in roles:
+        if model_available(config.ollama_host, preferred):
+            parts.append(f"{label}={preferred}")
+            continue
+        resolved = resolve_model(config.ollama_host, preferred, role)  # type: ignore[arg-type]
+        if model_available(config.ollama_host, resolved.model):
+            parts.append(f"{label}={preferred}→{resolved.model}")
+        else:
+            missing_hard.append(preferred)
+            parts.append(f"{label}={preferred} (missing)")
+
+    if missing_hard:
         return False, "AI index (ask/find)", (
-            f"missing model(s): {', '.join(missing)} — `ollama pull {missing[0]}` "
-            f"(or change [global.ai] in rules.toml)"
+            f"missing model(s): {', '.join(missing_hard)} — `ollama pull {missing_hard[0]}` "
+            f"(or change [global.ai] in rules.toml). Roles: {', '.join(parts)}"
         )
-    return True, "AI index (ask/find)", (
-        f"embed={config.ai_embed_model}, planner={config.ai_planner_model}, "
-        f"vision={config.ai_vision_model}"
-    )
+    return True, "AI index (ask/find)", ", ".join(parts)
 
 
 def check_hardware() -> tuple[bool, str, str]:
@@ -143,13 +184,9 @@ def check_hardware() -> tuple[bool, str, str]:
 
 
 def check_index_freshness(config) -> tuple[bool, str, str]:
-    """Captions written by a vision model you no longer use are stale: `index` skips
-    those photos (it's model-scoped) but `find`/`ask` still read the old text."""
+    """Captions written by a vision model you no longer use are stale; also report
+    caption vs embedding coverage for the current keys."""
     from .catalog import Catalog
-
-    # Must match how captions are actually stored: model + prompt version. A
-    # prompt change makes old captions describe the library differently, which
-    # is exactly the kind of drift this check exists to surface.
     from .ai.indexer import caption_key
 
     current = caption_key(config)
@@ -159,6 +196,8 @@ def check_index_freshness(config) -> tuple[bool, str, str]:
         return False, "Index freshness", f"can't open the catalog: {type(e).__name__}: {e}"
     try:
         models = catalog.caption_models()
+        caption_n = models.get(current, 0)
+        embed_n = len(catalog.embedded_uuids(config.ai_embed_model))
     finally:
         catalog.close()
 
@@ -168,15 +207,39 @@ def check_index_freshness(config) -> tuple[bool, str, str]:
         which = ", ".join(m for m, _ in sorted(stale.items(), key=lambda kv: -kv[1]))
         return False, "Index freshness", (
             f"{total:,} caption(s) from {which} but you're now configured for {current} "
-            f"— run `haymish index --reindex-captions` to refresh"
+            f"— run `haymish doctor --fix index` or `haymish index --catch-up-captions`"
+        )
+    if not models and embed_n == 0:
+        return True, "Index freshness", f"no captions yet — run `haymish index` (vision model {current})"
+    if embed_n and caption_n < max(1, int(embed_n * 0.1)):
+        return False, "Index freshness", (
+            f"{caption_n:,} caption(s) under {current} vs {embed_n:,} embeddings — "
+            f"search works but subgroups/`find` About text are thin. "
+            f"Run `haymish index --catch-up-captions`"
         )
     if not models:
-        return True, "Index freshness", f"no captions yet — run `haymish index` (vision model {current})"
-    return True, "Index freshness", f"{models[current]:,} caption(s), all from {current}"
+        return True, "Index freshness", (
+            f"0 captions / {embed_n:,} embeddings — OCR-only index; "
+            f"run `haymish index --catch-up-captions` for vision descriptions"
+        )
+    return True, "Index freshness", (
+        f"{caption_n:,} caption(s) from {current}; {embed_n:,} embeddings "
+        f"({config.ai_embed_model})"
+    )
 
 
-def check_backup(backup: Path | None) -> tuple[bool, str, str]:
+def check_backup(backup: Path | None, config=None) -> tuple[bool, str, str]:
+    needs_backup = False
+    if config is not None:
+        needs_backup = any(
+            r.enabled and (r.archive or r.delete) for r in config.rules
+        )
     if backup is None:
+        if needs_backup:
+            return False, "Backup volume", (
+                "not configured but archive/delete rules are enabled — set "
+                "[global].backup in rules.toml (USB stick path is fine) or disable those stages"
+            )
         return True, "Backup volume", (
             "not configured — archive/delete stages will refuse to run until "
             "[global].backup is set (a USB stick or external drive path works)"
@@ -203,5 +266,5 @@ def run_all(config=None) -> list[tuple[bool, str, str]]:
         checks.append(check_ollama(config.ollama_host, config.ollama_model))
         checks.append(check_ai_index(config))
         checks.append(check_index_freshness(config))
-        checks.append(check_backup(config.backup))
+        checks.append(check_backup(config.backup, config))
     return checks

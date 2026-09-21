@@ -136,7 +136,13 @@ def _call_llm(config: Config, request: str, existing_albums: list[str]) -> str:
         )
         return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
-    return ollama_client.generate(config.ollama_host, config.ai_planner_model,
+    from .model_resolve import resolve_model
+    resolved = resolve_model(config.ollama_host, config.ai_planner_model, "planner")
+    if not ollama_client.model_available(config.ollama_host, resolved.model):
+        raise AIError(
+            f"planner model {config.ai_planner_model!r} unavailable ({resolved.note})"
+        )
+    return ollama_client.generate(config.ollama_host, resolved.model,
                                    prompt, format_json=True, think=False, timeout=180)
 
 
