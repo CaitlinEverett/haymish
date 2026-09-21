@@ -682,6 +682,7 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
             gap_hours = float(body.get("gap_hours") or 14.0)
             max_km = float(body.get("max_km") or 60.0)
             limit = int(body.get("limit") or 40)
+            query = (body.get("query") or "").strip() or None
 
             def run(job: Job):
                 from .events import cluster_events, pick_representative
@@ -711,19 +712,57 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
                         e.photo_count = len(e.uuids)
                 events = [e for e in events if e.photo_count]
 
-                events.sort(key=lambda e: e.significance, reverse=True)
+                # -- semantic ranking (optional) --------------------------------
+                query_meta = None
+                if query:
+                    from .ai.ollama_client import AIError
+                    from .ai.search import gallery_scores, semantic_scores
+
+                    catalog_q = Catalog()
+                    try:
+                        scores = semantic_scores(state.config, catalog_q, query)
+                    except AIError as e:
+                        # Degrade gracefully: fall back to significance ranking
+                        # and surface the error.
+                        query_meta = {"query": query, "error": str(e)}
+                        scores = {}
+                    finally:
+                        catalog_q.close()
+
+                    if scores:
+                        ranked = gallery_scores(scores, events)
+                        events = [ev for ev, _s, _i, _t in ranked]
+                        query_meta = {
+                            "query": query,
+                            "scores": {
+                                ev.key: round(score, 3)
+                                for ev, score, _i, _t in ranked
+                            },
+                            "coverage": {
+                                ev.key: {"indexed": idx, "total": tot}
+                                for ev, _s, idx, tot in ranked
+                            },
+                        }
+                    elif not query_meta:
+                        query_meta = {
+                            "query": query,
+                            "error": "No photos indexed yet — run `haymish index` first.",
+                        }
+                else:
+                    events.sort(key=lambda e: e.significance, reverse=True)
                 events = events[:limit]
 
                 # Only the cover thumbnail is generated up front. Member
                 # thumbnails are made on demand when a gallery is expanded --
                 # rendering 11,000 of them to draw 40 covers would be absurd.
                 out = []
+                score_map = (query_meta or {}).get("scores", {})
                 for i, e in enumerate(events):
                     members = [by_uuid[u] for u in e.uuids if u in by_uuid]
                     cover = pick_representative(members)
                     if cover is not None:
                         ensure_thumbnail(cover)
-                    out.append({
+                    entry = {
                         "key": e.key, "label": e.label, "place": e.place,
                         "photo_count": e.photo_count, "days": e.days,
                         "start": e.start.isoformat(), "end": e.end.isoformat(),
@@ -734,9 +773,15 @@ class HaymishHandler(http.server.BaseHTTPRequestHandler):
                         # regenerated label.
                         "album": chosen_names.get(e.key, ""),
                         "excluded": sorted(exclusions.get(e.key, ())),
-                    })
+                    }
+                    if e.key in score_map:
+                        entry["score"] = score_map[e.key]
+                    out.append(entry)
                     job.progress = {"phase": "covers", "done": i + 1, "total": len(events)}
-                return {"events": out, "total_events": len(events)}
+                result = {"events": out, "total_events": len(events)}
+                if query_meta:
+                    result["query"] = query_meta
+                return result
 
             job = state.start_job("galleries", run)
             self._json({"job": job.id})

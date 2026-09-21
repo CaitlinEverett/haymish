@@ -53,8 +53,9 @@ def init(force: bool):
 
 
 @main.command()
-@click.option("--fix", "fix_what", default=None, type=click.Choice(["index"]),
-              help="Attempt a safe auto-heal: `index` runs caption catch-up when freshness fails.")
+@click.option("--fix", "fix_what", default=None, type=click.Choice(["index", "config"]),
+              help="Attempt a safe auto-heal: `index` runs caption catch-up when freshness "
+                   "fails; `config` prints proposed model fixes (never rewrites rules.toml).")
 def doctor(fix_what):
     """Check permissions, library access, and backends."""
     from . import doctor as doc
@@ -71,6 +72,19 @@ def doctor(fix_what):
         mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
         console.print(f" {mark} [bold]{label}[/bold] — {detail}")
         failed += 0 if ok else 1
+
+    if fix_what == "config" and config is not None:
+        fixes = doc.propose_config_fixes(config)
+        if fixes:
+            console.print("\n[bold]Proposed config changes[/bold] (paste into rules.toml):\n")
+            for key, current, proposed in fixes:
+                console.print(f"  {key} = [green]{proposed!r}[/green]  [dim](was {current!r})[/dim]")
+            console.print(
+                "\n[dim]These are suggestions — Haymish will not edit rules.toml for you. "
+                "The daemon already falls back to available models at runtime via model_resolve.[/dim]"
+            )
+        else:
+            console.print("\n[green]No config fixes needed — all configured models are available.[/green]")
 
     if fix_what == "index" and config is not None:
         console.print("\n[bold]Fixing index…[/bold] running `haymish index --catch-up-captions`")
@@ -365,13 +379,21 @@ def packs_show(name):
                    "picked from Apple's own quality scores. Photos has no API for "
                    "setting an album's key photo, so a keyword is how a cover is marked.")
 @click.option("--no-open", is_flag=True, help="With --create: print the URL but don't open a browser.")
-def galleries(gap_hours, max_km, min_photos, limit, sort_by, album_prefix, cover_keyword, no_open):
+@click.option("--query", "semantic_query", default=None, metavar="QUERY",
+              help='Semantic search — rank galleries by how well their photos match a '
+                   'query (e.g. "beach vacation"). Uses the same AI index as `find`.')
+def galleries(gap_hours, max_km, min_photos, limit, sort_by, album_prefix, cover_keyword, no_open,
+              semantic_query):
     """Find trips and events by when and where photos were taken.
 
     Pure metadata — no AI, no index needed. Clusters on time gaps and distance,
     so a weekend away or a day's shoot comes out as one event. Read-only unless
     you pass --create, which routes every event through the usual thumbnail
     review before any album is made.
+
+    With --query, galleries are ranked by how well their members match a semantic
+    query (same AI index as `haymish find`). Galleries whose members aren't
+    indexed still appear — with a score of 0 and a warning.
     """
     from .catalog import Catalog
     from .events import cluster_events, summarize
@@ -388,29 +410,84 @@ def galleries(gap_hours, max_km, min_photos, limit, sort_by, album_prefix, cover
         console.print("No events found — try a smaller --min-photos or a larger --gap-hours.")
         return
 
-    # Sort before display AND before --create, so "the 25 most notable" is what
-    # gets albums, not the 25 oldest.
-    if sort_by == "notable":
-        events.sort(key=lambda e: e.significance, reverse=True)
-    elif sort_by == "photos":
-        events.sort(key=lambda e: e.photo_count, reverse=True)
-    else:
-        events.sort(key=lambda e: e.start)
+    # -- semantic ranking (--query) ------------------------------------------
+    if semantic_query:
+        from .ai.ollama_client import AIError
+        from .ai.search import gallery_scores, semantic_scores
 
-    console.print(summarize(events, limit=limit))
-    console.print(f"\n[dim]{len(events)} event(s) from {len(photos):,} photos.[/dim]")
-    if len(events) > limit * 4:
-        # A big library clusters into hundreds of small day-buckets. Say so, and
-        # say how to get fewer, rather than letting the number look like a bug.
-        console.print(
-            f"[dim]Lots of small clusters — most are single days. For just the big "
-            f"occasions try [bold]--min-photos {max(min_photos * 4, 40)}[/bold], or "
-            f"[bold]--gap-hours 48[/bold] to merge multi-day trips.[/dim]"
+        catalog_q = Catalog()
+        try:
+            scores = semantic_scores(config, catalog_q, semantic_query)
+        except AIError as e:
+            console.print(f"[red]{e}[/red]")
+            catalog_q.close()
+            sys.exit(1)
+
+        if not scores:
+            console.print(
+                "[red]Nothing indexed yet — run `haymish index` first.[/red]"
+                if not catalog_q.embedded_uuids(config.ai_embed_model)
+                else "[yellow]No embeddings found.[/yellow]"
+            )
+            catalog_q.close()
+            return
+
+        ranked = gallery_scores(scores, events)
+        # Partial coverage = members without embeddings in `scores`.
+        partial_index = sum(
+            1 for _, _, indexed, total in ranked if indexed < total
         )
+        catalog_q.close()
 
-    if album_prefix is None:
-        console.print('[dim]Add --create "Trips" to file these into albums (with review first).[/dim]')
-        return
+        # Replace events list with ranked events, apply limit.
+        events = [ev for ev, _score, _idx, _tot in ranked[:limit]]
+
+        table = Table(title=f"galleries matching: {semantic_query!r}")
+        table.add_column("Score", justify="right")
+        table.add_column("Event")
+        table.add_column("Photos", justify="right")
+        table.add_column("Indexed", justify="right")
+        table.add_column("Key")
+        for ev, score, indexed, total in ranked[:limit]:
+            table.add_row(
+                f"{score:.3f}", ev.label, str(total),
+                f"{indexed}/{total}", ev.key,
+            )
+        console.print(table)
+        if partial_index:
+            console.print(
+                f"[yellow]{partial_index} galler(ies) have partially indexed members — "
+                f"scores may improve after `haymish index` / `--catch-up-captions`.[/yellow]"
+            )
+        if album_prefix is None:
+            console.print(
+                f"[dim]{len(events)} event(s) ranked. "
+                f'Add --create "Trips" to file them into albums (with review first).[/dim]'
+            )
+            return
+        # Fall through to --create with the re-ranked events list.
+    else:
+        # Sort before display AND before --create, so "the 25 most notable" is what
+        # gets albums, not the 25 oldest.
+        if sort_by == "notable":
+            events.sort(key=lambda e: e.significance, reverse=True)
+        elif sort_by == "photos":
+            events.sort(key=lambda e: e.photo_count, reverse=True)
+        else:
+            events.sort(key=lambda e: e.start)
+
+        console.print(summarize(events, limit=limit))
+        console.print(f"\n[dim]{len(events)} event(s) from {len(photos):,} photos.[/dim]")
+        if len(events) > limit * 4:
+            console.print(
+                f"[dim]Lots of small clusters — most are single days. For just the big "
+                f"occasions try [bold]--min-photos {max(min_photos * 4, 40)}[/bold], or "
+                f"[bold]--gap-hours 48[/bold] to merge multi-day trips.[/dim]"
+            )
+
+        if album_prefix is None:
+            console.print('[dim]Add --create "Trips" to file these into albums (with review first).[/dim]')
+            return
 
     # One ephemeral rule per event, matched by explicit uuid set, so this goes
     # through the same preview -> review -> apply path as everything else.

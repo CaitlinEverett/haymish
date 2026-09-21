@@ -42,6 +42,32 @@ def top_matches(scores: dict[str, float], k: int) -> list[tuple[str, float]]:
     return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
 
 
+def gallery_scores(
+    scores: dict[str, float],
+    events: list,
+    min_members: int = 1,
+) -> list[tuple[object, float, int, int]]:
+    """Score and rank gallery events by how well their members match a query.
+
+    For each event, computes the mean semantic score of its *indexed* members.
+    Events with no indexed members are included with score 0 so the caller can
+    warn about missing coverage.
+
+    Returns (event, mean_score, indexed_count, total_count) sorted by
+    descending mean score.
+    """
+    ranked: list[tuple[object, float, int, int]] = []
+    for event in events:
+        member_scores = [scores[u] for u in event.uuids if u in scores]
+        total = len(event.uuids)
+        indexed = len(member_scores)
+        mean = sum(member_scores) / indexed if indexed else 0.0
+        if indexed >= min_members or indexed == 0:
+            ranked.append((event, mean, indexed, total))
+    ranked.sort(key=lambda r: r[1], reverse=True)
+    return ranked
+
+
 def index_coverage(config: Config, catalog: Catalog, photos: list) -> tuple[int, int]:
     """(indexed, total) for the current embed model — lets callers warn when the
     index is stale instead of silently searching a fraction of the library."""

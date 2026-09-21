@@ -202,7 +202,8 @@ function noThumbTile() { return '<div class="no-thumb">no preview</div>'; }
 const CARD_CAP = 48;
 const foldedGroups = new Set();   // "<rule>\n<groupKey>" for groups folded away
 const flatRules = new Set();      // rules the user switched back to a flat grid
-const expandedGrids = new Set();  // grid expand keys (rule or rule+group)
+const gridPageByKey = new Map();  // expand key -> 0-based page (CARD_CAP photos each)
+let sessionPicks = null;          // ruleName -> Map(uuid -> checked); off-page picks live here
 let gridSeq = 0;                  // unique ids so fold buttons can aria-control
 
 function gridExpandKey(ruleName, groupKey) {
@@ -231,11 +232,41 @@ function emptyStateMessage(payload, rules) {
     doctorHintHtml();
 }
 
+function initSessionPicks(rules) {
+  const prior = sessionPicks;
+  sessionPicks = new Map();
+  for (const rule of rules) {
+    const m = new Map();
+    const old = prior && prior.get(rule.name);
+    for (const c of rule.candidates || []) {
+      const u = String(c.uuid);
+      m.set(u, old && old.has(u) ? old.get(u) : true);
+    }
+    sessionPicks.set(rule.name, m);
+  }
+}
+
+function syncPicksFromSection(section) {
+  if (!sessionPicks || !section) return;
+  section.querySelectorAll('.pick').forEach(cb => {
+    const rm = sessionPicks.get(cb.dataset.rule);
+    if (rm) rm.set(String(cb.dataset.uuid), cb.checked);
+  });
+}
+
+function isPicked(ruleName, uuid, legacyMap) {
+  const u = String(uuid);
+  if (legacyMap && legacyMap.has(u)) return legacyMap.get(u) !== false;
+  const rm = sessionPicks && sessionPicks.get(ruleName);
+  if (rm && rm.has(u)) return rm.get(u) !== false;
+  return true;
+}
+
 function renderSession(payload) {
   currentSession = payload;
   foldedGroups.clear();
   flatRules.clear();
-  expandedGrids.clear();
+  gridPageByKey.clear();
   $('apply-outcome').innerHTML = '';
   clearBanner('apply-session');
   const root = $('review-root');
@@ -245,6 +276,10 @@ function renderSession(payload) {
     html += '<p class="plan-desc">' + esc(payload.plan.description) + '</p>';
   }
   const rules = payload.rules || [];
+  initSessionPicks(rules);
+  for (const rule of rules) {
+    for (const g of ruleSubgroups(rule)) foldedGroups.add(rule.name + '\n' + g.key);
+  }
   const hasCandidates = rules.some(r => (r.candidates || []).length);
   const hasErrors = rules.some(r => (r.errors || []).length);
   if (!rules.length || (!hasCandidates && !hasErrors)) {
@@ -259,23 +294,9 @@ function renderSession(payload) {
     // why (e.g. "no photos indexed yet") -- otherwise this silently reads as
     // "nothing to do" when the truth is "couldn't check".
     if (!(rule.candidates || []).length && !(rule.errors || []).length) continue;
-    html += ruleSectionHtml(rule, null);
+    html += ruleSectionHtml(rule);
   }
   root.innerHTML = html;
-  // Subgroups start folded so large queues stay scannable.
-  root.querySelectorAll('.subgroup[data-fold-key]').forEach(sec => {
-    const key = sec.dataset.foldKey;
-    if (!key) return;
-    foldedGroups.add(key);
-    sec.dataset.folded = '1';
-    const grid = sec.querySelector('.grid');
-    if (grid) grid.hidden = true;
-    const foldBtn = sec.querySelector('[data-action="group-fold"]');
-    if (foldBtn) {
-      foldBtn.textContent = 'show group';
-      foldBtn.setAttribute('aria-expanded', 'false');
-    }
-  });
   $('apply-status').textContent = '';
   $('apply-btn').disabled = false;
   $('apply-bar').hidden = !hasCandidates;
@@ -321,10 +342,6 @@ function ruleSubgroups(rule) {
 
 function photoCount(n) { return n + ' photo' + (n === 1 ? '' : 's'); }
 
-// null map = fresh render (everything checked, as before); a map is a snapshot
-// taken before re-rendering one rule, so a view switch never loses a decision.
-function isPicked(map, uuid) { return !map || map.get(String(uuid)) !== false; }
-
 function candidateCardHtml(ruleName, c, picked) {
   const thumb = c.thumb
     ? '<img src="/thumb/' + encodeURIComponent(c.uuid) + '" alt="" loading="lazy">'
@@ -339,27 +356,47 @@ function candidateCardHtml(ruleName, c, picked) {
     '</label>';
 }
 
-function gridHtml(ruleName, items, checkedMap, attrs, expandKey) {
+function gridHtml(ruleName, items, attrs, expandKey) {
   const key = expandKey != null ? expandKey : gridExpandKey(ruleName, null);
-  const expanded = expandedGrids.has(key);
-  const shown = expanded ? items : items.slice(0, CARD_CAP);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / CARD_CAP));
+  let page = gridPageByKey.get(key) || 0;
+  if (page >= totalPages) page = totalPages - 1;
+  if (page < 0) page = 0;
+  gridPageByKey.set(key, page);
+  const start = page * CARD_CAP;
+  const shown = items.slice(start, start + CARD_CAP);
+  const end = start + shown.length;
   let html = '<div class="grid"' + (attrs || '') + '>' +
-    shown.map(c => candidateCardHtml(ruleName, c, isPicked(checkedMap, c.uuid))).join('') +
+    shown.map(c => candidateCardHtml(ruleName, c, isPicked(ruleName, c.uuid))).join('') +
     '</div>';
-  if (!expanded && items.length > shown.length) {
-    html += '<p class="grid-expand"><button type="button" class="link-btn" data-action="grid-expand" ' +
-      'data-expand-key="' + esc(key) + '">Show all ' + items.length + ' photos</button></p>';
+  if (total > CARD_CAP) {
+    html += '<div class="grid-pager" role="navigation" aria-label="Photos in this group">';
+    if (page > 0) {
+      html += '<button type="button" class="link-btn" data-action="grid-page" data-expand-key="' +
+        esc(key) + '" data-page="' + (page - 1) + '">Previous</button>';
+    }
+    html += '<span class="grid-pager-meta">' + (start + 1) + '–' + end + ' of ' + total + '</span>';
+    if (page < totalPages - 1) {
+      html += '<button type="button" class="link-btn" data-action="grid-page" data-expand-key="' +
+        esc(key) + '" data-page="' + (page + 1) + '">Next</button>';
+    }
+    html += '</div>';
   }
   return html;
 }
 
-function subgroupHtml(rule, group, checkedMap) {
+function subgroupHtml(rule, group) {
   const foldKey = rule.name + '\n' + group.key;
   const folded = foldedGroups.has(foldKey);
   const expandKey = gridExpandKey(rule.name, group.key);
   const gridId = 'rg-' + (++gridSeq);
+  const body = folded
+    ? '<p class="grid-folded muted">' + esc(photoCount(group.items.length)) +
+      ' in this group — choose “show group” to review (' + CARD_CAP + ' per page).</p>'
+    : gridHtml(rule.name, group.items, ' id="' + gridId + '"', expandKey);
   return '<section class="subgroup" data-folded="' + (folded ? '1' : '0') +
-    '" data-fold-key="' + esc(foldKey) + '">' +
+    '" data-fold-key="' + esc(foldKey) + '" data-group-key="' + esc(group.key) + '">' +
     '<div class="subgroup-header">' +
     '<h4 class="subgroup-title">' + esc(group.label) +
     ' <span class="subgroup-count">— ' + photoCount(group.items.length) + '</span></h4>' +
@@ -369,13 +406,11 @@ function subgroupHtml(rule, group, checkedMap) {
     '<button type="button" class="link-btn" data-action="group-fold" aria-controls="' + gridId +
     '" aria-expanded="' + (folded ? 'false' : 'true') + '">' +
     (folded ? 'show group' : 'hide group') + '</button>' +
-    '</div></div>' +
-    gridHtml(rule.name, group.items, checkedMap, ' id="' + gridId + '"' + (folded ? ' hidden' : ''),
-      expandKey) +
+    '</div></div>' + body +
     '</section>';
 }
 
-function ruleSectionHtml(rule, checkedMap) {
+function ruleSectionHtml(rule) {
   const cands = rule.candidates || [];
   const errors = rule.errors || [];
   const groups = ruleSubgroups(rule);
@@ -398,8 +433,8 @@ function ruleSectionHtml(rule, checkedMap) {
     : '';
 
   const body = grouped
-    ? groups.map(g => subgroupHtml(rule, g, checkedMap)).join('')
-    : gridHtml(rule.name, cands, checkedMap, '', gridExpandKey(rule.name, null));
+    ? groups.map(g => subgroupHtml(rule, g)).join('')
+    : gridHtml(rule.name, cands, '', gridExpandKey(rule.name, null));
 
   const needGroupBanner = cands.length >= 24 && !(rule.subgroups || []).length;
   const groupBanner = needGroupBanner
@@ -422,17 +457,36 @@ function ruleSectionFor(name) {
     .find(sec => sec.dataset.rule === name) || null;
 }
 
-// Folding is purely visual: the cards stay in the DOM (just hidden) so their
-// checkbox state -- and the apply count -- are untouched.
-function toggleGroupFold(group, btn) {
-  const folded = group.dataset.folded !== '1';
-  group.dataset.folded = folded ? '1' : '0';
-  const grid = group.querySelector('.grid');
-  if (grid) grid.hidden = folded;
-  btn.textContent = folded ? 'show group' : 'hide group';
-  btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+function refreshSubgroup(ruleName, groupKey) {
+  if (!currentSession) return;
+  const rule = (currentSession.rules || []).find(r => r.name === ruleName);
+  const group = rule && ruleSubgroups(rule).find(g => g.key === groupKey);
+  const section = ruleSectionFor(ruleName);
+  if (!rule || !group || !section) return;
+  const sel = '.subgroup[data-group-key="' + CSS.escape(groupKey) + '"]';
+  const el = section.querySelector(sel);
+  if (!el) return;
+  const foldBtn = el.querySelector('[data-action="group-fold"]');
+  const hadFocus = foldBtn && document.activeElement === foldBtn;
+  el.outerHTML = subgroupHtml(rule, group);
+  if (hadFocus) {
+    const fresh = section.querySelector(sel);
+    const btn = fresh && fresh.querySelector('[data-action="group-fold"]');
+    if (btn) btn.focus();
+  }
+}
+
+function toggleGroupFold(group) {
   const key = group.dataset.foldKey;
-  if (key) { if (folded) foldedGroups.add(key); else foldedGroups.delete(key); }
+  if (!key || !currentSession) return;
+  const nl = key.indexOf('\n');
+  if (nl < 0) return;
+  const ruleName = key.slice(0, nl);
+  const groupKey = key.slice(nl + 1);
+  syncPicksFromSection(group.closest('.rule-section'));
+  if (group.dataset.folded === '1') foldedGroups.delete(key);
+  else foldedGroups.add(key);
+  refreshSubgroup(ruleName, groupKey);
 }
 
 // Re-render one rule in the other layout, carrying every checkbox across.
@@ -442,9 +496,8 @@ function setRuleView(name, view) {
   const section = ruleSectionFor(name);
   if (!rule || !section) return;
   if (view === 'flat') flatRules.add(name); else flatRules.delete(name);
-  const checkedMap = new Map();
-  section.querySelectorAll('.pick').forEach(cb => { checkedMap.set(String(cb.dataset.uuid), cb.checked); });
-  section.outerHTML = ruleSectionHtml(rule, checkedMap);
+  syncPicksFromSection(section);
+  section.outerHTML = ruleSectionHtml(rule);
   updateCount();
   const fresh = ruleSectionFor(name);
   if (fresh) {
@@ -454,11 +507,22 @@ function setRuleView(name, view) {
 }
 
 function updateCount() {
-  $('sel-count').textContent = $('review-root').querySelectorAll('.pick:checked').length;
+  let n = 0;
+  if (sessionPicks) {
+    for (const rm of sessionPicks.values()) {
+      for (const v of rm.values()) if (v) n++;
+    }
+  } else {
+    n = $('review-root').querySelectorAll('.pick:checked').length;
+  }
+  $('sel-count').textContent = n;
 }
 
 $('review-root').addEventListener('change', e => {
-  if (e.target.classList.contains('pick')) updateCount();
+  if (!e.target.classList.contains('pick')) return;
+  const rm = sessionPicks && sessionPicks.get(e.target.dataset.rule);
+  if (rm) rm.set(String(e.target.dataset.uuid), e.target.checked);
+  updateCount();
 });
 $('review-root').addEventListener('click', e => {
   const btn = e.target.closest('[data-action]');
@@ -469,13 +533,34 @@ $('review-root').addEventListener('click', e => {
     const group = btn.closest('.subgroup');
     if (!group) return;
     const checked = action === 'group-select-all';
+    const ruleName = group.closest('.rule-section')?.dataset.rule;
+    const groupKey = group.dataset.groupKey;
+    if (ruleName && groupKey && sessionPicks && currentSession) {
+      const rule = (currentSession.rules || []).find(r => r.name === ruleName);
+      const g = rule && ruleSubgroups(rule).find(x => x.key === groupKey);
+      const rm = sessionPicks.get(ruleName);
+      if (g && rm) for (const c of g.items) rm.set(String(c.uuid), checked);
+    }
     group.querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
     updateCount();
     return;
   }
   if (action === 'group-fold') {
     const group = btn.closest('.subgroup');
-    if (group) toggleGroupFold(group, btn);
+    if (group) toggleGroupFold(group);
+    return;
+  }
+  if (action === 'grid-page') {
+    const key = btn.dataset.expandKey;
+    const page = parseInt(btn.dataset.page, 10);
+    if (key && !Number.isNaN(page)) {
+      gridPageByKey.set(key, page);
+      const section = btn.closest('.rule-section');
+      if (section && currentSession) {
+        syncPicksFromSection(section);
+        setRuleView(section.dataset.rule, flatRules.has(section.dataset.rule) ? 'flat' : 'grouped');
+      }
+    }
     return;
   }
   if (action === 'rule-view') {
@@ -483,19 +568,13 @@ $('review-root').addEventListener('click', e => {
     if (section) setRuleView(section.dataset.rule, btn.dataset.view);
     return;
   }
-  if (action === 'grid-expand') {
-    const key = btn.dataset.expandKey;
-    if (key) expandedGrids.add(key);
-    const section = btn.closest('.rule-section');
-    if (section && currentSession) {
-      setRuleView(section.dataset.rule,
-        flatRules.has(section.dataset.rule) ? 'flat' : 'grouped');
-    }
-    return;
-  }
-  // Rule-level bulk select still reaches every card, grouped or flat.
+  if (action !== 'select-all' && action !== 'select-none') return;
+  const section = btn.closest('.rule-section');
+  if (!section) return;
   const checked = action === 'select-all';
-  btn.closest('.rule-section').querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
+  const rm = sessionPicks && sessionPicks.get(section.dataset.rule);
+  if (rm) for (const k of rm.keys()) rm.set(k, checked);
+  section.querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
   updateCount();
 });
 
@@ -505,10 +584,14 @@ function reviewSelectionTotals() {
   for (const rule of (currentSession && currentSession.rules) || []) {
     const total = (rule.candidates || []).length;
     if (!total) continue;
-    const sel = $('review-root').querySelectorAll('.pick:checked').length
-      ? Array.from($('review-root').querySelectorAll('.pick:checked'))
-        .filter(cb => cb.dataset.rule === rule.name).length
-      : 0;
+    let sel = 0;
+    const rm = sessionPicks && sessionPicks.get(rule.name);
+    if (rm) {
+      for (const v of rm.values()) if (v) sel++;
+    } else {
+      sel = Array.from($('review-root').querySelectorAll('.pick:checked'))
+        .filter(cb => cb.dataset.rule === rule.name).length;
+    }
     selected += sel;
     rejects += total - sel;
   }
@@ -574,7 +657,12 @@ $('review-root').addEventListener('keydown', e => {
     if (card) {
       e.preventDefault();
       const cb = card.querySelector('.pick');
-      if (cb) { cb.checked = !cb.checked; updateCount(); }
+      if (cb) {
+        cb.checked = !cb.checked;
+        const rm = sessionPicks && sessionPicks.get(cb.dataset.rule);
+        if (rm) rm.set(String(cb.dataset.uuid), cb.checked);
+        updateCount();
+      }
       return;
     }
   }
@@ -586,6 +674,18 @@ $('review-root').addEventListener('keydown', e => {
   if (!scope) return;
   e.preventDefault();
   const checked = e.key === 'a';
+  const ruleName = scope.closest('.rule-section')?.dataset.rule;
+  const groupKey = scope.classList.contains('subgroup') ? scope.dataset.groupKey : null;
+  if (sessionPicks && ruleName && currentSession) {
+    const rule = (currentSession.rules || []).find(r => r.name === ruleName);
+    const rm = sessionPicks.get(ruleName);
+    if (rm && rule) {
+      const uuids = groupKey
+        ? ((ruleSubgroups(rule).find(g => g.key === groupKey) || {}).items || []).map(c => String(c.uuid))
+        : [...rm.keys()];
+      for (const u of uuids) rm.set(u, checked);
+    }
+  }
   scope.querySelectorAll('.pick').forEach(cb => { cb.checked = checked; });
   updateCount();
 });
@@ -604,10 +704,19 @@ $('apply-btn').addEventListener('click', async () => {
   // Every rule in the session is submitted, so unchecked candidates get recorded
   // as rejections even when a whole rule is deselected.
   const selections = {};
-  for (const rule of currentSession.rules || []) selections[rule.name] = [];
-  $('review-root').querySelectorAll('.pick:checked').forEach(cb => {
-    (selections[cb.dataset.rule] = selections[cb.dataset.rule] || []).push(cb.dataset.uuid);
-  });
+  for (const rule of currentSession.rules || []) {
+    const rm = sessionPicks && sessionPicks.get(rule.name);
+    if (rm) {
+      selections[rule.name] = [];
+      for (const [uuid, picked] of rm) if (picked) selections[rule.name].push(uuid);
+    } else {
+      selections[rule.name] = [];
+      $('review-root').querySelectorAll('.pick:checked').forEach(cb => {
+        if (cb.dataset.rule === rule.name) selections[rule.name].push(cb.dataset.uuid);
+      });
+    }
+  }
+  syncPicksFromSection($('review-root'));
   btn.disabled = true;
   status.textContent = 'Applying…';
   try {
@@ -848,12 +957,16 @@ function galleryCardHtml(ev, idx) {
       esc(ev.label) + '" loading="lazy"' + THUMB_FALLBACK + '>'
     : noThumbTile();
   const note = galleryRemovedNote(ev);
+  const scoreTag = (ev.score != null)
+    ? '<span class="score">' + esc(String(ev.score)) + '</span>'
+    : '';
   return '<div class="card gal-card" role="button" tabindex="0" data-gal-idx="' + idx + '"' +
     ' aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="gal-panel-' + idx + '"' +
     ' title="' + esc(galleryTooltip(ev)) + '">' +
     '<input type="checkbox" class="gal-pick" data-gal-pick="' + idx + '"' +
       (galleryChecked.has(ev.key) ? ' checked' : '') +
       ' aria-label="Save ' + esc(ev.label) + '">' +
+    scoreTag +
     '<div class="thumb">' + cover + '</div>' +
     '<p class="filename" title="' + esc(ev.label) + '">' + esc(ev.label) + '</p>' +
     '<p class="detail">' + esc(galleryCaption(ev)) + '</p>' +
@@ -1059,12 +1172,25 @@ function galleryMinPhotos() {
 // editing state -- the server has just changed what it will hand back.
 async function scanGalleries(minPhotos) {
   const prog = $('gallery-progress');
+  const query = ($('gallery-query') || {}).value;
   prog.textContent = 'starting…';
   try {
-    const result = await runJob('/api/galleries', { min_photos: minPhotos },
+    const body = { min_photos: minPhotos };
+    if (query && query.trim()) body.query = query.trim();
+    const result = await runJob('/api/galleries', body,
       p => { prog.textContent = phaseText(p); });
     galleryEvents = (result && result.events) || [];
     galleryTotal = (result && result.total_events) || galleryEvents.length;
+    // Surface query errors or partial-coverage warnings.
+    if (result && result.query) {
+      if (result.query.error) {
+        banner('Gallery query: ' + result.query.error, 'gallery-query');
+      } else {
+        clearBanner('gallery-query');
+      }
+    } else {
+      clearBanner('gallery-query');
+    }
   } finally {
     prog.textContent = '';
   }
