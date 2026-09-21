@@ -83,13 +83,19 @@ CONSECUTIVE_FAILURE_LIMIT = 5
 RECENT_FAILURE_WINDOW = 8
 RECENT_FAILURE_LIMIT = 4
 FINAL_FAILURE_RATE_LIMIT = 0.25
+# Don't trip the end-of-run rate abort until enough attempts exist — a 1/3
+# failure on `--limit 3` must not pretend the whole library is unhealthy.
+FINAL_FAILURE_MIN_ATTEMPTS = 32
 MAX_AUTO_CAPTION_WORKERS = 2
 CAPTION_TIMEOUT_SECONDS = 180
 CAPTION_GENERATION_OPTIONS: dict[str, int | float] = {
     "temperature": 0,
     "seed": 0,
-    "num_predict": 512,
+    # qwen3-vl can spend a large hidden budget before visible tokens; 512 was
+    # producing empty done_reason=length responses under overnight catch-up.
+    "num_predict": 1024,
 }
+CAPTION_RETRY_NUM_PREDICT = 2048
 
 EMBED_BATCH = 16
 CHUNK = 8
@@ -206,15 +212,32 @@ def caption_photo(config: Config, photo) -> str | None:
     if not source or not Path(source).is_file():
         return None
     image_bytes = Path(source).read_bytes()
-    return ollama_client.generate(
-        config.ollama_host,
-        config.ai_vision_model,
-        caption_prompt(photo),
-        image_bytes=image_bytes,
-        think=False,
-        options=CAPTION_GENERATION_OPTIONS,
-        timeout=CAPTION_TIMEOUT_SECONDS,
-    ).strip()
+    prompt = caption_prompt(photo)
+    try:
+        return ollama_client.generate(
+            config.ollama_host,
+            config.ai_vision_model,
+            prompt,
+            image_bytes=image_bytes,
+            think=False,
+            options=CAPTION_GENERATION_OPTIONS,
+            timeout=CAPTION_TIMEOUT_SECONDS,
+        ).strip()
+    except AIError as e:
+        # Empty done_reason=length: retry once with a larger output budget.
+        if "done_reason='length'" not in str(e) and 'done_reason="length"' not in str(e):
+            raise
+        retry_opts = dict(CAPTION_GENERATION_OPTIONS)
+        retry_opts["num_predict"] = CAPTION_RETRY_NUM_PREDICT
+        return ollama_client.generate(
+            config.ollama_host,
+            config.ai_vision_model,
+            prompt,
+            image_bytes=image_bytes,
+            think=False,
+            options=retry_opts,
+            timeout=CAPTION_TIMEOUT_SECONDS,
+        ).strip()
 
 
 def vector_to_blob(vector: list[float]) -> tuple[bytes, int]:
@@ -418,17 +441,27 @@ def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: 
         raise
 
     caption_attempts = stats.captioned + stats.caption_failed
+    failure_rate = (
+        stats.caption_failed / caption_attempts if caption_attempts else 0.0
+    )
     if (
-        caption_attempts
-        and stats.caption_failed / caption_attempts >= FINAL_FAILURE_RATE_LIMIT
+        caption_attempts >= FINAL_FAILURE_MIN_ATTEMPTS
+        and failure_rate >= FINAL_FAILURE_RATE_LIMIT
     ):
-        error = AIError(
+        msg = (
             f"caption run marked failed: {stats.caption_failed}/{caption_attempts} "
-            f"requests failed ({stats.caption_failed / caption_attempts:.0%}). "
+            f"requests failed ({failure_rate:.0%}). "
             f"Successful captions remain durable; inspect Ollama contention before retrying."
         )
-        log.aborted(error)
-        raise error
+        if catch_up_captions:
+            # Overnight catch-up: keep durable successes and finish cleanly so
+            # the host job can be relaunched without treating progress as a crash.
+            stats.errors.append(msg)
+            log._write(f"WARN  {msg}")
+        else:
+            error = AIError(msg)
+            log.aborted(error)
+            raise error
 
     log.finish(stats, time.monotonic() - started)
     return stats

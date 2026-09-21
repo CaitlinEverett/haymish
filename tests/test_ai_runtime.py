@@ -180,30 +180,54 @@ def test_backend_failure_is_bounded_to_one_small_chunk():
     assert fake_catalog.put_embedding.call_count == indexer.CHUNK == 8
 
 
-def test_single_item_failure_cannot_report_success():
+def test_single_item_failure_does_not_abort_tiny_runs():
+    """A one-photo sample must not trip the library-scale failure-rate abort."""
     fake_catalog = catalog()
 
     with index_patches(AIError("timed out")):
-        with pytest.raises(AIError, match="1/1 requests failed"):
-            indexer.index_photos(
-                config(), fake_catalog, [photo()], concurrency=1
-            )
+        stats = indexer.index_photos(
+            config(), fake_catalog, [photo()], concurrency=1
+        )
+
+    assert stats.caption_failed == 1
+    assert stats.captioned == 0
 
 
 def test_high_final_failure_rate_returns_an_error_after_preserving_successes():
     fake_catalog = catalog()
-    photos = [photo(f"u{i}") for i in range(8)]
+    photos = [photo(f"u{i}") for i in range(32)]
 
     def caption(_config, asset):
-        if asset.uuid in {"u0", "u1"}:
+        # 10/32 = 31% failures — above FINAL_FAILURE_RATE_LIMIT once the
+        # minimum attempt floor is met.
+        if int(asset.uuid[1:]) < 10:
             raise AIError("timed out")
         return f"Screenshot caption for {asset.uuid}"
 
     with index_patches(caption):
-        with pytest.raises(AIError, match="2/8 requests failed"):
+        with pytest.raises(AIError, match="10/32 requests failed"):
             indexer.index_photos(
                 config(), fake_catalog, photos, concurrency=1
             )
 
-    assert fake_catalog.put_caption.call_count == 6
-    assert fake_catalog.put_embedding.call_count == 8
+    assert fake_catalog.put_caption.call_count == 22
+
+
+def test_catch_up_high_failure_rate_warns_instead_of_aborting():
+    fake_catalog = catalog()
+    photos = [photo(f"u{i}") for i in range(32)]
+
+    def caption(_config, asset):
+        if int(asset.uuid[1:]) < 10:
+            raise AIError("timed out")
+        return f"Screenshot caption for {asset.uuid}"
+
+    with index_patches(caption):
+        stats = indexer.index_photos(
+            config(), fake_catalog, photos, concurrency=1,
+            catch_up_captions=True,
+        )
+
+    assert stats.caption_failed == 10
+    assert stats.captioned == 22
+    assert any("marked failed" in e for e in stats.errors)
