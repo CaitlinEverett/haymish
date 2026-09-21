@@ -1,5 +1,12 @@
 # Haymish agent guide
 
+## Standing brief
+
+Every turn, conversation, compaction, feature, and epic follows
+`docs/STANDING_BRIEF.md` (product card, four cells, Atlas gulfs + 2.5 principles,
+grains, testing bar). Re-read it after any compaction summary before editing.
+UX detail checklist: `docs/HCI_HEURISTICS.md`.
+
 ## Mission
 
 Haymish is a local-first, review-first control surface over Apple Photos. It helps people annotate, group, curate, and organize assets without becoming a second photo silo. Applied albums, keywords, and Photos state should remain useful if Haymish is removed.
