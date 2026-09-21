@@ -77,3 +77,46 @@ tail -f ~/.haymish/logs/reindex-catchup-*.log
 
 1. Index freshness — catch-up in progress / needed.
 2. Backup volume unset while archive/delete rules enabled — paste doctor proposals or set `[global].backup` before any delete dogfood (`docs/plans/backup-archive-delete-dogfood.md`).
+
+## Return handoff — 2026-09-21 evening (UT + cleanup)
+
+Git: everything from this push is already on `main` (`aeab4e9` and ancestors). No open PR; no dirty tree after this handoff commit. Session `/tmp/haymish-*` temps (including a dash URL that held a serve token) were deleted.
+
+### Shipped this session (already on main)
+
+| Commit range | What |
+|--------------|------|
+| `52f3f15`…`7e1964f` | Efficacy + galleries `--query` + paged review / `sessionPicks` |
+| `293043e`…`ec34cb0` | SMOKE + deferred plans; doctor `--fix config`; safety tests |
+| `a6f5f1f`…`d398a4b` | Review packets; non-TTY/heartbeats; caption length resilience; host launcher |
+| `f8b7545`…`aeab4e9` | Atlas HCI heuristics + standing brief doctrine |
+
+### Live host state (not in git)
+
+- **Catch-up:** `./scripts/haymish-reindex-catchup.sh` family — watch `~/.haymish/index.log` (was ~104/29,116 captions, failed=0). Status: `~/.haymish/jobs/reindex-status.json`.
+- **Serve:** was healthy on `:8787` at handoff (durable pid family ~72965). If it dies: restart outside the agent shell so it survives. Token lives in `~/.haymish/serve.json` — do not paste it into chat.
+- **No Photos apply** was done in UT.
+
+### Pretend-user findings (next product work, not committed as code)
+
+1. Fail-closed UI for archive/delete/hide when backup unset (doctor proposes; rules still look “ready”).
+2. Cap first review page; show why-matched / hide eligibility on cards (4.3k screenshot queue is a cliff).
+3. Index panel should show host catch-up % / rate (status file does not update mid-run).
+4. Find/Ask honesty when captions ≪ embeds; Ask subgroup labels can be nonsense (“document, car, card”).
+5. Rename `junk`; `haymish serve` auto-detach.
+
+### What you should check when you return
+
+```bash
+cd ~/dev/haymish
+git status -sb                    # expect clean main == origin/main
+uv run haymish doctor --fix config   # paste archive/delete comments or set backup
+tail -20 ~/.haymish/index.log     # catch-up still advancing?
+cat ~/.haymish/jobs/reindex-status.json
+# if catch-up dead:
+./scripts/haymish-reindex-catchup.sh --catch-up-captions
+# dashboard (optional):
+uv run haymish serve              # then open printed URL; prefer Terminal for PhotoKit
+```
+
+Smoke when ready for a real apply: `docs/SMOKE.md` (one small subgroup → undo). Do not enable delete dogfood until backup plan is done.
