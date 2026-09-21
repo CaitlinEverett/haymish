@@ -456,3 +456,49 @@ console.log(JSON.stringify({{ called, hasDocument: typeof document !== 'undefine
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"called": False, "hasDocument": False}
+
+
+# -- job error surfacing ------------------------------------------------------
+
+def test_job_get_surfaces_error_state_and_message():
+    """GET /api/jobs/<id> must expose job.error when state is error."""
+    handler = FakeHandler("/api/jobs/deadbeef")
+    handler.headers["X-Haymish-Token"] = handler.state.token
+    job = server.Job(id="deadbeef", kind="apply")
+    job.state = "error"
+    job.error = "RuntimeError: session expired"
+    handler.state.jobs["deadbeef"] = job
+    handler.do_GET()
+
+    assert handler.status == 200
+    payload = json.loads(handler.body)
+    assert payload["state"] == "error"
+    assert payload["error"] == "RuntimeError: session expired"
+    assert payload["id"] == "deadbeef"
+
+
+def test_job_get_unknown_is_404():
+    handler = FakeHandler("/api/jobs/missing")
+    handler.headers["X-Haymish-Token"] = handler.state.token
+    handler.do_GET()
+    assert handler.status == 404
+    assert b"unknown job" in handler.body
+
+
+def test_start_job_records_exceptions_as_error_state():
+    """ServeState.start_job must not leave a hanging 'running' job on raise."""
+    import time
+
+    state = offline_state("tok")
+
+    def boom(job):
+        raise ValueError("explode")
+
+    job = state.start_job("test", boom)
+    for _ in range(50):
+        if job.state != "running":
+            break
+        time.sleep(0.02)
+    assert job.state == "error"
+    assert "ValueError" in (job.error or "")
+    assert "explode" in (job.error or "")

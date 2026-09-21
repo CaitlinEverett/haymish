@@ -251,19 +251,37 @@ def check_backup(backup: Path | None, config=None) -> tuple[bool, str, str]:
 
 
 def propose_config_fixes(config) -> list[tuple[str, str, str]]:
-    """(toml_key, current_value, proposed_value) for fixable model-resolution issues.
+    """(toml_key, current_value, proposed_value) for fixable config issues.
 
-    Pure diagnostic: reads Ollama's model list and the config, proposes changes
-    the user can paste into rules.toml. Never writes anything itself — the CLI
-    prints the patch, and the human decides whether to apply it.
+    Pure diagnostic: proposes patches the user can paste into rules.toml.
+    Never writes anything itself — the CLI prints the patch, and the human
+    decides whether to apply it.
     """
     from .ai.model_resolve import resolve_model
     from .ai.ollama_client import available_models, model_available
 
-    if not available_models(config.ollama_host):
-        return []
-
     fixes: list[tuple[str, str, str]] = []
+
+    # Soft safety: archive/delete without a backup path is fail-closed at
+    # doctor time; propose commenting stages out (never invent a backup path).
+    if not config.backup:
+        for rule in config.rules or []:
+            if getattr(rule, "archive", None) is not None:
+                fixes.append((
+                    f"[rule.{rule.name}].archive",
+                    f"after_days={rule.archive.after_days}",
+                    "# comment out until [global].backup is set",
+                ))
+            if getattr(rule, "delete", None) is not None:
+                fixes.append((
+                    f"[rule.{rule.name}].delete",
+                    f"after_days={rule.delete.after_days}",
+                    "# comment out until [global].backup is set",
+                ))
+
+    models = available_models(config.ollama_host)
+    if not models:
+        return fixes
 
     if not model_available(config.ollama_host, config.ollama_model):
         resolved = resolve_model(config.ollama_host, config.ollama_model, "classify")

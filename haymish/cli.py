@@ -78,7 +78,13 @@ def doctor(fix_what):
         if fixes:
             console.print("\n[bold]Proposed config changes[/bold] (paste into rules.toml):\n")
             for key, current, proposed in fixes:
-                console.print(f"  {key} = [green]{proposed!r}[/green]  [dim](was {current!r})[/dim]")
+                # Keys look like [rule.name].archive — escape so Rich does not
+                # treat "[rule.name]" as a style tag and swallow the rule path.
+                console.print(
+                    f"  {key} = {proposed!r}  (was {current!r})",
+                    markup=False,
+                    highlight=False,
+                )
             console.print(
                 "\n[dim]These are suggestions — Haymish will not edit rules.toml for you. "
                 "The daemon already falls back to available models at runtime via model_resolve.[/dim]"
@@ -723,47 +729,75 @@ def index(no_captions, limit, concurrency, reindex_captions, catch_up_captions, 
             catalog.close()
             return
 
-    from rich.progress import Progress
+    # Rich Progress needs a TTY. Redirected / nohup / launchd runs die or hang
+    # silently after the plan line if we keep the live bar — use plain prints.
+    use_rich_progress = sys.stdout.isatty()
+    last_log_at = {"n": -1}
 
-    with Progress(console=console) as prog:
-        tasks: dict = {}
-
-        def on_progress(done, total, phase):
-            if phase not in tasks:
-                # Captions and embeddings are interleaved now, so one bar covers
-                # both; the label must say which work is actually happening or it
-                # reads as "captioning stalled" during a --no-captions run.
-                labels = {"caption": "Captioning", "embed": "Embedding",
-                          "index": "Embedding" if no_captions else "Captioning + embedding"}
-                tasks[phase] = prog.add_task(labels.get(phase, "Indexing"), total=total)
-            prog.update(tasks[phase], completed=done)
-
-        def on_plan(stats, total, cfg):
-            # Printed before any work: what's already done, what's left, and by
-            # which model. A run with nothing to do must say so plainly rather
-            # than showing a bar that advances over photos it's skipping.
-            prog.console.print(
-                f"[dim]{stats.already_indexed:,} already indexed · "
-                f"{stats.needs_embedding:,} to embed ({cfg.ai_embed_model})"
-                + (f" · {stats.needs_caption:,} to caption ({cfg.ai_vision_model})"
-                   if not no_captions else "")
-                + "[/dim]"
+    def on_plan(stats, total, cfg):
+        # Printed before any work: what's already done, what's left, and by
+        # which model. A run with nothing to do must say so plainly rather
+        # than showing a bar that advances over photos it's skipping.
+        console.print(
+            f"[dim]{stats.already_indexed:,} already indexed · "
+            f"{stats.needs_embedding:,} to embed ({cfg.ai_embed_model})"
+            + (f" · {stats.needs_caption:,} to caption ({cfg.ai_vision_model})"
+               if not no_captions else "")
+            + "[/dim]"
+        )
+        if total and not stats.needs_embedding and not stats.needs_caption:
+            console.print(
+                "[yellow]Nothing to do — every photo already has an embedding "
+                "for this model.[/yellow]"
             )
-            if total and not stats.needs_embedding and not stats.needs_caption:
-                prog.console.print(
-                    "[yellow]Nothing to do — every photo already has an embedding "
-                    "for this model.[/yellow]"
-                )
 
-        try:
-            stats = index_photos(config, catalog, photos, captions=not no_captions,
-                                  catch_up_captions=catch_up_captions,
-                                  limit=limit, progress=on_progress,
-                                  concurrency=concurrency, plan=on_plan)
-        except AIError as e:
-            console.print(f"[red]{e}[/red]")
-            catalog.close()
-            sys.exit(1)
+    try:
+        if use_rich_progress:
+            from rich.progress import Progress
+
+            with Progress(console=console) as prog:
+                tasks: dict = {}
+
+                def on_progress(done, total, phase):
+                    if phase not in tasks:
+                        labels = {
+                            "caption": "Captioning",
+                            "embed": "Embedding",
+                            "index": "Embedding" if no_captions else "Captioning + embedding",
+                        }
+                        tasks[phase] = prog.add_task(
+                            labels.get(phase, "Indexing"), total=total
+                        )
+                    prog.update(tasks[phase], completed=done)
+
+                stats = index_photos(
+                    config, catalog, photos, captions=not no_captions,
+                    catch_up_captions=catch_up_captions, limit=limit,
+                    progress=on_progress, concurrency=concurrency, plan=on_plan,
+                )
+        else:
+            def on_progress(done, total, phase):
+                # Log every 25 photos (and the first/last) so redirected runs
+                # prove they are alive without flooding the log.
+                if done == 0 or done == total or done - last_log_at["n"] >= 25:
+                    last_log_at["n"] = done
+                    console.print(
+                        f"[dim]{phase}: {done:,}/{total:,}[/dim]", highlight=False
+                    )
+                    try:
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
+
+            stats = index_photos(
+                config, catalog, photos, captions=not no_captions,
+                catch_up_captions=catch_up_captions, limit=limit,
+                progress=on_progress, concurrency=concurrency, plan=on_plan,
+            )
+    except AIError as e:
+        console.print(f"[red]{e}[/red]")
+        catalog.close()
+        sys.exit(1)
 
     catalog.close()
     console.print(

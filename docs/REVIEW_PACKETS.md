@@ -48,14 +48,17 @@ Pushed to `main`. Full suite green after these commits. Live Photos apply was no
 
 ## Host job (not a commit)
 
-Caption catch-up for prompt `qwen3-vl:8b+p6` / freshness gap:
+Prefer the launcher (survives agent exit; plain progress when non-TTY):
 
 ```bash
-tail -f ~/.haymish/index-catchup-20260921.log
-# or: uv run haymish doctor   # watch Index freshness
+cd ~/dev/haymish && ./scripts/haymish-reindex-catchup.sh --catch-up-captions
+tail -f ~/.haymish/logs/reindex-catchup-*.log
+# status: cat ~/.haymish/jobs/reindex-status.json
 ```
+
+`doctor --fix config` now also proposes commenting out `archive`/`delete` when backup is unset (does not rewrite rules.toml).
 
 ## Known live doctor gaps (human)
 
 1. Index freshness — catch-up in progress / needed.
-2. Backup volume unset while archive/delete rules enabled — disable those stages or set `[global].backup` before any delete dogfood (`docs/plans/backup-archive-delete-dogfood.md`).
+2. Backup volume unset while archive/delete rules enabled — paste doctor proposals or set `[global].backup` before any delete dogfood (`docs/plans/backup-archive-delete-dogfood.md`).

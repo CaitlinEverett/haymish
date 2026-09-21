@@ -206,3 +206,38 @@ def test_doctor_without_fix_just_reports(tmp_path):
     # Should not mention proposals without --fix config
     assert "Proposed" not in result.output
     assert result.exit_code == 1  # one failing check
+
+
+def test_propose_comments_archive_delete_when_backup_unset():
+    """Archive/delete without backup gets a propose-only comment-out suggestion."""
+    from haymish.config import Rule, StageConfig
+
+    rule = Rule(
+        name="ad-screenshots",
+        archive=StageConfig(after_days=60),
+        delete=StageConfig(after_days=90),
+    )
+    with (
+        patch("haymish.ai.ollama_client.available_models", return_value=set()),
+    ):
+        fixes = propose_config_fixes(_config(backup=None, rules=[rule]))
+
+    keys = [f[0] for f in fixes]
+    assert "[rule.ad-screenshots].archive" in keys
+    assert "[rule.ad-screenshots].delete" in keys
+    assert all("backup" in f[2] for f in fixes)
+
+
+def test_propose_skips_archive_when_backup_set():
+    from haymish.config import Rule, StageConfig
+
+    rule = Rule(name="ad-screenshots", archive=StageConfig(after_days=60))
+    with (
+        patch("haymish.ai.ollama_client.available_models", return_value={"gemma3:4b"}),
+        patch("haymish.ai.ollama_client.model_available", return_value=True),
+    ):
+        fixes = propose_config_fixes(
+            _config(backup=Path("/Volumes/PhotoVault"), rules=[rule])
+        )
+
+    assert fixes == []
