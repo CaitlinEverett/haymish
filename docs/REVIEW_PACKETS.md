@@ -42,6 +42,19 @@ Pushed to `main`. Full suite green after these commits. Live Photos apply was no
 
 **Smoke:** `uv run haymish doctor --fix config` (read-only suggestions).
 
+## Packet E — `aec2ab4` non-TTY index + archive pause proposals
+
+**Review:** [aec2ab4](https://github.com/CaitlinEverett/haymish/commit/aec2ab4)
+
+| Area | What to check |
+|------|----------------|
+| Index CLI | Non-TTY runs print `phase: done/total` every 25; Rich Progress only on a TTY |
+| Doctor | `--fix config` proposes commenting `[rule.*].archive/delete` when backup unset; Rich no longer swallows `[rule.…]` |
+| Host | `./scripts/haymish-reindex-catchup.sh` double-forks out of agent process groups |
+| Tests | Job GET error payload; start_job exception → error state |
+
+**Live:** catch-up should stay up after this packet — `cat ~/.haymish/jobs/reindex-status.json`
+
 ## Prior efficacy (already on main)
 
 **Review:** [52f3f15](https://github.com/CaitlinEverett/haymish/commit/52f3f15) — review UX, `model_resolve`, hide eligibility.

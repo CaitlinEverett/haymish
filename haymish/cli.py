@@ -777,9 +777,9 @@ def index(no_captions, limit, concurrency, reindex_captions, catch_up_captions, 
                 )
         else:
             def on_progress(done, total, phase):
-                # Log every 25 photos (and the first/last) so redirected runs
+                # Log every 10 photos (and the first/last) so redirected runs
                 # prove they are alive without flooding the log.
-                if done == 0 or done == total or done - last_log_at["n"] >= 25:
+                if done == 0 or done == total or done - last_log_at["n"] >= 10:
                     last_log_at["n"] = done
                     console.print(
                         f"[dim]{phase}: {done:,}/{total:,}[/dim]", highlight=False

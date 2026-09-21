@@ -359,6 +359,10 @@ def index_photos(config: Config, catalog: Catalog, photos: list[Any], captions: 
         for start in range(0, len(todo), CHUNK):
             chunk = todo[start:start + CHUNK]
             fresh_captions: set[str] = set()
+            if progress:
+                # Heartbeat before the chunk's network wait so redirected /
+                # overnight runs prove liveness while Ollama is slow or swapping models.
+                progress(min(done, total), total, "index")
             if captions:
                 needs_caption = [p for p in chunk if p.uuid not in captioned]
                 if needs_caption:
