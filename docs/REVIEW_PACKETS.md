@@ -42,18 +42,19 @@ Pushed to `main`. Full suite green after these commits. Live Photos apply was no
 
 **Smoke:** `uv run haymish doctor --fix config` (read-only suggestions).
 
-## Packet E — `aec2ab4` non-TTY index + archive pause proposals
+## Packet E — `aec2ab4` / `7c3e933` / `924601b` / `d398a4b` host catch-up resilience
 
-**Review:** [aec2ab4](https://github.com/CaitlinEverett/haymish/commit/aec2ab4)
+**Review:** [aec2ab4](https://github.com/CaitlinEverett/haymish/commit/aec2ab4) … [d398a4b](https://github.com/CaitlinEverett/haymish/commit/d398a4b)
 
 | Area | What to check |
 |------|----------------|
-| Index CLI | Non-TTY runs print `phase: done/total` every 25; Rich Progress only on a TTY |
-| Doctor | `--fix config` proposes commenting `[rule.*].archive/delete` when backup unset; Rich no longer swallows `[rule.…]` |
-| Host | `./scripts/haymish-reindex-catchup.sh` double-forks out of agent process groups |
-| Tests | Job GET error payload; start_job exception → error state |
+| Non-TTY index | Plain progress + chunk heartbeats; Rich Progress only on TTY |
+| Doctor | `--fix config` proposes commenting archive/delete when backup unset |
+| Host launcher | `./scripts/haymish-reindex-catchup.sh` double-forks out of agent process groups |
+| Captions | `num_predict=1024`, retry on empty `length`, catch-up warns instead of aborting high rates |
+| Live tip | If catch-up stalls, `ollama ps` — stop large non-vision models hogging VRAM |
 
-**Live:** catch-up should stay up after this packet — `cat ~/.haymish/jobs/reindex-status.json`
+**Watch:** `tail -f ~/.haymish/logs/reindex-catchup-*.log` and `cat ~/.haymish/jobs/reindex-status.json`
 
 ## Prior efficacy (already on main)
 
