@@ -120,3 +120,17 @@ uv run haymish serve              # then open printed URL; prefer Terminal for P
 ```
 
 Smoke when ready for a real apply: `docs/SMOKE.md` (one small subgroup → undo). Do not enable delete dogfood until backup plan is done.
+
+## Overnight test — 2026-09-22 → AM 2026-09-23
+
+**Running now:** host catch-up (`haymish index --catch-up-captions`, caffeinate). Kickoff ~3.6k/29k captions.
+
+**Morning auto:** launchd `dev.haymish.morning-index-report` at **7:30 AM** runs `scripts/haymish-morning-index-report.sh` → `~/.haymish/jobs/morning-report-YYYYMMDD.md` (then unloads itself).
+
+**Contract:** `~/.haymish/jobs/OVERNIGHT-2026-09-22.md`
+
+```bash
+# AM first look
+open ~/.haymish/jobs/morning-report-$(date +%Y%m%d).md
+# or: cat ~/.haymish/jobs/morning-report-*.md | less
+```
