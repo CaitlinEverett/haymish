@@ -1,5 +1,9 @@
 # Haymish agent guide
 
+<!-- central-agents:begin (managed by `wf agents-sync`; edit ~/dev/workflow/agents/AGENTS.central.md) -->
+> Inherits the central rules: `~/dev/workflow/agents/AGENTS.central.md` (secrets, deploy, routing, BMLE, tools). Rules below add to them and may be stricter.
+<!-- central-agents:end -->
+
 ## Standing brief
 
 Every turn, conversation, compaction, feature, and epic follows
